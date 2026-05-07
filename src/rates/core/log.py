@@ -10,6 +10,7 @@ Contract: C-014.
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 
@@ -24,4 +25,9 @@ def log(level: str, msg: str, **ctx: Any) -> None:
     The V1 implementation prints to stderr. V2 may substitute a structured backend
     (loguru/structlog) without changing this signature.
     """
-    raise NotImplementedError("M-004: implement log() — V1 prints to stderr, key=value ctx.")
+    if ctx:
+        ctx_str = " ".join(f"{k}={v}" for k, v in ctx.items())
+        line = f"[{level}] {msg} {ctx_str}"
+    else:
+        line = f"[{level}] {msg}"
+    print(line, file=sys.stderr)

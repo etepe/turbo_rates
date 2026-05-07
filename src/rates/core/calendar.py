@@ -15,9 +15,15 @@ Contracts: C-009.
 
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
+
+import holidays
+
+_DEFAULT_OVERRIDE_DIR = Path("config/holidays")
+_DEFAULT_YEAR_RADIUS = 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,22 +60,70 @@ class HolidayCalendar:
         Raises:
             FileNotFoundError: When override_dir is provided but {ccy}.csv is missing.
         """
-        raise NotImplementedError(
-            "M-002: load holidays.<ccy>(years), then merge config/holidays/{ccy}.csv. "
-            "CSV rows are added to the set; CSV-with-no-rows is valid (package-only)."
-        )
+        if years is None:
+            current_year = date.today().year
+            years = range(
+                current_year - _DEFAULT_YEAR_RADIUS,
+                current_year + _DEFAULT_YEAR_RADIUS + 1,
+            )
+
+        pkg_holidays = holidays.country_holidays(ccy, years=list(years))
+        merged: set[date] = {d for d in pkg_holidays}
+
+        csv_path: Path | None
+        if override_dir is not None:
+            csv_path = override_dir / f"{ccy.lower()}.csv"
+            if not csv_path.exists():
+                raise FileNotFoundError(f"holiday override CSV not found for {ccy!r}: {csv_path}")
+        else:
+            candidate = _DEFAULT_OVERRIDE_DIR / f"{ccy.lower()}.csv"
+            csv_path = candidate if candidate.exists() else None
+
+        if csv_path is not None:
+            for d in _read_holiday_csv(csv_path):
+                merged.add(d)
+
+        return cls(currency=ccy, _holidays=frozenset(merged), _override_source=csv_path)
 
     # ---------------------------------------------------------------------
     # Queries
     # ---------------------------------------------------------------------
     def is_holiday(self, d: date) -> bool:
         """True iff ``d`` is a holiday in this calendar."""
-        raise NotImplementedError("M-002: return d in self._holidays.")
+        return d in self._holidays
 
     def is_business_day(self, d: date) -> bool:
         """True iff ``d`` is a weekday and not a holiday."""
-        raise NotImplementedError("M-002: weekday() < 5 and not self.is_holiday(d).")
+        return d.weekday() < 5 and not self.is_holiday(d)
 
     def add_business_days(self, d: date, n: int) -> date:
         """Return the date ``n`` business days from ``d`` (negative ``n`` walks backward)."""
-        raise NotImplementedError("M-002: walk one day at a time skipping non-business days.")
+        if n == 0:
+            return d
+        step = timedelta(days=1 if n > 0 else -1)
+        remaining = abs(n)
+        cur = d
+        while remaining > 0:
+            cur = cur + step
+            if self.is_business_day(cur):
+                remaining -= 1
+        return cur
+
+
+def _read_holiday_csv(path: Path) -> list[date]:
+    """Parse a holiday-override CSV.
+
+    Format: comment lines starting with ``#`` are skipped; the remainder must have a
+    header ``date,description`` (description optional). Each ``date`` cell is parsed as
+    ISO-8601 (YYYY-MM-DD).
+    """
+    dates: list[date] = []
+    with path.open(encoding="utf-8") as f:
+        non_comment = (line for line in f if not line.lstrip().startswith("#"))
+        reader = csv.DictReader(non_comment)
+        for row in reader:
+            raw = (row.get("date") or "").strip()
+            if not raw:
+                continue
+            dates.append(date.fromisoformat(raw))
+    return dates
