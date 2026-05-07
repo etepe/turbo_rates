@@ -1,0 +1,7 @@
+# Expected CBRT MPC policy path. Edit when expectations change.
+# Columns: meeting_date (YYYY-MM-DD), bps_change (signed integer), rationale (free text, optional).
+# rates.core.scenario reads initial TLREF from snapshot's BISTTREF row, then applies these changes.
+meeting_date,bps_change,rationale
+2026-05-22,-250,Disinflation path; expected 250 bps cut
+2026-06-26,-250,Continuation of easing cycle
+2026-07-24,-150,Smaller step as policy rate nears neutral

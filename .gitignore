@@ -19,9 +19,15 @@ build/
 # OS
 .DS_Store
 
-# Project data outputs (regenerable; not in git)
-data/
-!data/.gitkeep
+# Project data outputs (regenerable; not in git). We keep .gitkeep markers so the
+# directory layout survives a fresh clone — only generated artifacts are ignored.
+data/**/*.json
+data/**/*.parquet
+data/**/*.csv
+data/**/_metadata
+data/**/_common_metadata
+data/snapshots/*  # snapshots are user-supplied at runtime
+!data/snapshots/.gitkeep
 
 # Reference Excel files (binary, large; not committed)
 *.xlsm

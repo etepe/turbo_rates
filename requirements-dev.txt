@@ -1,0 +1,7 @@
+# Dev-only dependencies. Install with: pip install -r requirements.txt -r requirements-dev.txt
+-r requirements.txt
+pytest>=7.4
+mypy>=1.8
+ruff>=0.3
+types-pyyaml
+pandas-stubs
