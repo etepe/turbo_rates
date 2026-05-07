@@ -1,0 +1,4 @@
+# EU holiday overrides on top of the `holidays` Python package.
+# CSV rows WIN on conflict. An empty file (header only) means "no overrides".
+# Columns: date (YYYY-MM-DD), description (free text, optional).
+date,description
