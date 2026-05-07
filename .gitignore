@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# Project data outputs (regenerable; not in git)
+data/
+!data/.gitkeep
+
+# Reference Excel files (binary, large; not committed)
+*.xlsm
+*.xlsx
+
+# Installer/binary artifacts
+*.dmg
+
+# Claude local state
+.claude/
+
+# Test / type / lint cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
