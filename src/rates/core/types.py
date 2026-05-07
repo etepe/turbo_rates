@@ -23,15 +23,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
-from enum import Enum
-
+from enum import StrEnum
 
 # ---------------------------------------------------------------------------
 # Enums (shared)
 # ---------------------------------------------------------------------------
 
 
-class DayCount(str, Enum):
+class DayCount(StrEnum):
     """Day-count basis. Used by Conventions, daycount.year_fraction, and curve APIs."""
 
     ACT_360 = "Act/360"
@@ -39,7 +38,7 @@ class DayCount(str, Enum):
     THIRTY_360 = "30/360"
 
 
-class BusinessDayConvention(str, Enum):
+class BusinessDayConvention(StrEnum):
     """How to roll a payment date that lands on a non-business day."""
 
     FOLLOWING = "following"

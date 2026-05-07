@@ -28,9 +28,15 @@ def year_fraction(d1: date, d2: date, basis: DayCount) -> float:
         Signed float: positive when d2 > d1, zero when d2 == d1, negative when d2 < d1.
 
     Raises:
-        NotImplementedError: until M-003 is implemented.
+        ValueError: If ``basis`` is not a recognised :class:`DayCount` member.
     """
-    raise NotImplementedError(
-        "M-003: implement year_fraction. Act/360 -> (d2-d1).days / 360.0; "
-        "Act/365 -> (d2-d1).days / 365.0; 30/360 -> 30/360 ISDA convention."
-    )
+    if basis is DayCount.ACT_360:
+        return (d2 - d1).days / 360.0
+    if basis is DayCount.ACT_365:
+        return (d2 - d1).days / 365.0
+    if basis is DayCount.THIRTY_360:
+        d1_day = min(d1.day, 30)
+        d2_day = min(d2.day, 30) if d1_day == 30 else d2.day
+        days = 360 * (d2.year - d1.year) + 30 * (d2.month - d1.month) + (d2_day - d1_day)
+        return days / 360.0
+    raise ValueError(f"unsupported day-count basis: {basis!r}")

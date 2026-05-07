@@ -15,11 +15,11 @@ Contract: C-004.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class Severity(str, Enum):
+class Severity(StrEnum):
     """Diagnostic severity. Maps directly to exit-code policy (any ERROR -> 2)."""
 
     WARN = "WARN"
@@ -51,20 +51,24 @@ class DiagnosticsCollector:
 
     def warn(self, code: str, message: str, context: dict[str, Any] | None = None) -> None:
         """Record a WARN-severity diagnostic. Curve producible; downstream continues."""
-        raise NotImplementedError("M-005: append a Diagnostic(WARN, ...) to self._records.")
+        self._records.append(
+            Diagnostic(severity=Severity.WARN, code=code, message=message, context=context or {})
+        )
 
     def error(self, code: str, message: str, context: dict[str, Any] | None = None) -> None:
         """Record an ERROR-severity diagnostic. Caller should abort downstream work."""
-        raise NotImplementedError("M-005: append a Diagnostic(ERROR, ...) to self._records.")
+        self._records.append(
+            Diagnostic(severity=Severity.ERROR, code=code, message=message, context=context or {})
+        )
 
     def to_list(self) -> list[Diagnostic]:
         """Return a defensive copy of all diagnostics in insertion order."""
-        raise NotImplementedError("M-005: return list(self._records).")
+        return list(self._records)
 
     def has_errors(self) -> bool:
         """True iff at least one ERROR diagnostic has been recorded."""
-        raise NotImplementedError("M-005: any(d.severity == ERROR for d in self._records).")
+        return any(d.severity is Severity.ERROR for d in self._records)
 
     def exit_code(self) -> int:
         """Map state to process exit code: 2 if any ERROR else 0."""
-        raise NotImplementedError("M-005: 2 if self.has_errors() else 0.")
+        return 2 if self.has_errors() else 0
