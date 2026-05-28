@@ -66,3 +66,53 @@ def fx_diagnose_args() -> argparse.Namespace:
         convention_override=None,
         quiet=True,
     )
+
+
+@pytest.fixture()
+def fx_bootstrap_args(fx_diagnose_args, tmp_path) -> argparse.Namespace:
+    """`rates fx bootstrap` Namespace = diagnose Namespace + output_root.
+
+    Persists summary JSON + Parquet partitions under tmp_path.
+    """
+    fx_diagnose_args.output_root = tmp_path
+    return fx_diagnose_args
+
+
+def _make_fx_price_args(tmp_path) -> argparse.Namespace:
+    """Build the shared subset of args common to all three price verbs."""
+    return argparse.Namespace(
+        pair="USDTRY",
+        as_of=date(2026, 6, 12),
+        conventions_yaml=_REPO_ROOT / "config" / "conventions.yaml",
+        convention_override=None,
+        output_root=tmp_path,
+        quiet=False,
+    )
+
+
+@pytest.fixture()
+def fx_price_outright_args(tmp_path) -> argparse.Namespace:
+    """`rates fx price-outright` Namespace; tenor path by default."""
+    args = _make_fx_price_args(tmp_path)
+    args.tenor_code = "3M"
+    args.value_date = None
+    return args
+
+
+@pytest.fixture()
+def fx_price_swap_args(tmp_path) -> argparse.Namespace:
+    """`rates fx price-swap` Namespace; both legs tenor-path by default."""
+    args = _make_fx_price_args(tmp_path)
+    args.near_tenor = "1M"
+    args.near_value_date = None
+    args.far_tenor = "3M"
+    args.far_value_date = None
+    return args
+
+
+@pytest.fixture()
+def fx_price_xccy_args(tmp_path) -> argparse.Namespace:
+    """`rates fx price-xccy` Namespace; tenor-keyed."""
+    args = _make_fx_price_args(tmp_path)
+    args.tenor_code = "1Y"
+    return args
