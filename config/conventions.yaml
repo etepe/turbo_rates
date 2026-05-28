@@ -14,6 +14,37 @@ ois_conventions:
     payment:
       default_frequency: annual              # >1Y pillars use annual coupons
       bullet_until: 1Y                       # <=1Y degenerates to single bullet payment
+  # USD/EUR added for V2 FX layer (rates.fx). Consumed unchanged by bootstrap_curve.
+  USD:
+    day_count: Act/360
+    business_day_convention: modified_following
+    calendar: US
+    payment:
+      default_frequency: annual
+      bullet_until: 1Y
+  EUR:
+    day_count: Act/360
+    business_day_convention: modified_following
+    calendar: EU
+    payment:
+      default_frequency: annual
+      bullet_until: 1Y
+
+# ---------------------------------------------------------------------------
+# FX conventions (V2 — rates.fx). Per-pair quote and settlement metadata.
+# Loaded by rates.fx.conventions; rates.core.conventions ignores this block.
+# ---------------------------------------------------------------------------
+fx_conventions:
+  USDTRY:
+    quote_convention: direct        # TRY per 1 USD
+    spot_lag_days: 1                # T+1 spot
+    settlement_calendars: [US, TR]  # spot must be a business day in both
+    forward_point_scale: 10000      # quoted pips = points * scale
+  EURTRY:
+    quote_convention: direct
+    spot_lag_days: 2
+    settlement_calendars: [EU, TR]
+    forward_point_scale: 10000
 
 # ---------------------------------------------------------------------------
 # TLREF index basis (separate from OIS).

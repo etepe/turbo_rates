@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rates-engine"
-version = "0.1.0"
+version = "0.2.0"
 description = "Turkish Lira OIS curve engine — bootstrap, scenario, market vs scenario comparison"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -33,6 +33,8 @@ dev = [
     "ruff>=0.3",
     "types-pyyaml",
     "pandas-stubs",
+    "hypothesis>=6.0",
+    "openpyxl>=3.1",
 ]
 
 [project.scripts]
@@ -84,4 +86,6 @@ markers = [
     "phase3: Phase 3 scenario & report tests",
     "phase4: Phase 4 io & schemas tests",
     "phase5: Phase 5 integration tests",
+    "phase6: Phase 6 hardening — property-based invariants (Hypothesis)",
+    "phase7: Phase 7 V2 FX layer (scaffold; most bodies deferred to V2)",
 ]
