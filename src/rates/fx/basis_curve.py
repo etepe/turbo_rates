@@ -72,6 +72,11 @@ class CrossCurrencyBasisCurve:
     def basis_at(self, target: date) -> float:
         """Basis spread (bps) at ``target``.
 
+        Convention: at ``spot_date`` the basis is zero (no xccy spread on the
+        spot leg). Between knots — ``(spot_date, 0.0)`` and the bootstrapped
+        pillars — the spread is piecewise-linear on bps weighted by calendar
+        days (FX-O2 default).
+
         Args:
             target: Target date; must satisfy
                 ``spot_date <= target <= last_pillar.maturity_date``.
@@ -81,7 +86,6 @@ class CrossCurrencyBasisCurve:
 
         Raises:
             ValueError: When ``target`` is out of range.
-            NotImplementedError: V2 — interpolation not yet implemented.
         """
         if target < self.spot_date:
             raise ValueError(
@@ -92,7 +96,29 @@ class CrossCurrencyBasisCurve:
             raise ValueError(
                 f"DateOutOfRange: {target} is after last pillar maturity_date {last}"
             )
-        raise NotImplementedError("V2: CrossCurrencyBasisCurve.basis_at interpolation")
+        if target == self.spot_date:
+            return 0.0
+
+        # Bracket the target between two knots, treating (spot_date, 0.0) as
+        # the implicit zeroth knot.
+        a_date: date = self.spot_date
+        a_bps: float = 0.0
+        b_date: date = self.pillars_tuple[0].maturity_date
+        b_bps: float = self.pillars_tuple[0].spread_bps
+        for i in range(1, len(self.pillars_tuple)):
+            left = self.pillars_tuple[i - 1]
+            right = self.pillars_tuple[i]
+            if left.maturity_date <= target <= right.maturity_date:
+                a_date, a_bps = left.maturity_date, left.spread_bps
+                b_date, b_bps = right.maturity_date, right.spread_bps
+                break
+
+        if target == a_date:
+            return a_bps
+        if target == b_date:
+            return b_bps
+        w = (target - a_date).days / (b_date - a_date).days
+        return (1.0 - w) * a_bps + w * b_bps
 
     def pillars(self) -> pd.DataFrame:
         """Pillar table as a fresh DataFrame (defensive copy, safe to mutate)."""
