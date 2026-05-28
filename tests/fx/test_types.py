@@ -40,9 +40,7 @@ def test_quote_convention_enum_values() -> None:
     assert QuoteConvention("indirect") is QuoteConvention.INDIRECT
 
 
-@pytest.mark.phase7
-@pytest.mark.skip(reason="V2 — provider-level validation not yet implemented")
-def test_fx_market_data_rejects_inconsistent_pair_across_quotes() -> None:
-    """When forward_points or basis_quotes carry a different pair than spot,
-    the IO boundary will reject. Skipped until rates.io.fx_market lands."""
-    raise NotImplementedError
+# NOTE: The "pair consistency across quotes" check landed in v0.3.0 at the IO
+# boundary (M-108, rates.io.fx_market): rows with a non-matching pair are
+# skipped with FX_IO_PAIR_MISMATCH WARN. See
+# tests/io/test_fx_market.py::test_pair_mismatch_rows_skipped_with_warn.

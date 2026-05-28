@@ -1,0 +1,3 @@
+pair,instrument_type,tenor_code,tenor_days,bid,ask,mid,source
+USDTRY,FORWARD_POINT,1M,30,1820,1850,1835,REUTERS
+USDTRY,FORWARD_POINT,3M,91,5400,5460,5430,REUTERS

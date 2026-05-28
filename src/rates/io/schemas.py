@@ -223,11 +223,103 @@ class Summary(BaseModel):
         )
 
 
+# ---------------------------------------------------------------------------
+# FX persistence schemas (M-109, v0.3.0)
+# ---------------------------------------------------------------------------
+#
+# Persistence-side counterparts to rates.fx domain types. Consumed by M-110
+# (rates.io.persistence FX extension). The from_domain mapper lives there to
+# avoid pulling rates.fx imports into this module's V1 surface.
+#
+# Contract: feeds C-102 (rates.app → rates.io.persistence FX).
+
+#: FX summary schema version embedded in every FXSummary. Independent of
+#: SCHEMA_VERSION (V1 OIS) so the two can evolve separately.
+FX_SCHEMA_VERSION: int = 1
+
+
+class FXForwardPillarOut(BaseModel):
+    """Forward-curve pillar in the persisted FXSummary."""
+
+    model_config = _FROZEN
+
+    tenor_code: str
+    tenor_days: int
+    settle_date: date
+    forward_rate: float
+
+
+class FXBasisPillarOut(BaseModel):
+    """Cross-currency basis pillar in the persisted FXSummary."""
+
+    model_config = _FROZEN
+
+    tenor_code: str
+    tenor_days: int
+    maturity_date: date
+    spread_bps: float
+    quoted_on_foreign: bool
+
+
+class FXParityCheckRow(BaseModel):
+    """Per-pillar covered-interest-parity check result (M-105)."""
+
+    model_config = _FROZEN
+
+    tenor_code: str
+    settle_date: date
+    quoted_forward: float
+    parity_forward: float
+    diff_bps_of_spot: float
+
+
+class FXConfigSnapshot(BaseModel):
+    """FX pipeline configuration snapshot embedded in every FXSummary."""
+
+    model_config = _FROZEN
+
+    pair_code: str
+    domestic_currency: str
+    foreign_currency: str
+    quote_convention: Literal["direct", "indirect"]
+    spot_lag_days: int
+    settlement_calendars: list[str]
+    forward_point_scale: int
+
+
+class FXSummary(BaseModel):
+    """Top-level persisted FX summary.
+
+    Mirrors :class:`Summary` (V1 OIS) at the FX layer. Fields are in stable
+    order; reordering bumps ``schema_version`` per the same policy.
+    """
+
+    model_config = _FROZEN
+
+    schema_version: int
+    pair_code: str
+    valuation_date: date
+    spot_date: date
+    as_of_timestamp: datetime
+    spot_rate: float
+    forward_pillars: list[FXForwardPillarOut]
+    basis_pillars: list[FXBasisPillarOut]
+    parity_checks: list[FXParityCheckRow]
+    diagnostics: list[DiagnosticOut]
+    config_snapshot: FXConfigSnapshot
+
+
 __all__ = [
+    "FX_SCHEMA_VERSION",
     "SCHEMA_VERSION",
     "ComparisonRowOut",
     "ConfigSnapshot",
     "DiagnosticOut",
+    "FXBasisPillarOut",
+    "FXConfigSnapshot",
+    "FXForwardPillarOut",
+    "FXParityCheckRow",
+    "FXSummary",
     "ForwardRow",
     "PillarOut",
     "Summary",
