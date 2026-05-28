@@ -42,11 +42,13 @@ rates = "rates.cli:main"
 where = ["src"]
 
 # ---------------------------------------------------------------------------
-# mypy: strict only on rates.core and rates.io (per architecture decision A?)
+# mypy: strict across the full rates package (core, io, app, cli).
+# Phase 5 extended scope from {core,io} to the whole package once app + cli
+# were ready and proven strict-clean.
 # ---------------------------------------------------------------------------
 [tool.mypy]
 python_version = "3.11"
-files = ["src/rates/core", "src/rates/io"]
+files = ["src/rates"]
 strict = true
 warn_return_any = true
 warn_unused_configs = true
