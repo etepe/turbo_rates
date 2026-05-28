@@ -29,6 +29,10 @@ from rates.core.curve import OISCurve
 from rates.core.diagnostics import Diagnostic
 from rates.core.report import ComparisonTable
 from rates.core.scenario import ScenarioResult
+from rates.fx.basis_curve import CrossCurrencyBasisCurve
+from rates.fx.conventions import FXConvention
+from rates.fx.forward_curve import FXForwardCurve
+from rates.fx.types import CurrencyPair
 
 #: V1 schema version embedded in every Summary.
 SCHEMA_VERSION: int = 1
@@ -307,6 +311,99 @@ class FXSummary(BaseModel):
     parity_checks: list[FXParityCheckRow]
     diagnostics: list[DiagnosticOut]
     config_snapshot: FXConfigSnapshot
+
+    @classmethod
+    def from_domain(
+        cls,
+        *,
+        pair: CurrencyPair,
+        valuation_date: date,
+        forward: FXForwardCurve,
+        basis: CrossCurrencyBasisCurve | None,
+        parity_checks: list[FXParityCheckRow],
+        conv: FXConvention,
+        diagnostics: list[Diagnostic],
+        as_of_timestamp: datetime | None = None,
+    ) -> FXSummary:
+        """Build an FXSummary from domain objects.
+
+        Args:
+            pair:             Currency pair (drives domestic/foreign labels).
+            valuation_date:   As-of date of the snapshot.
+            forward:          Bootstrapped FX forward curve (M-103).
+            basis:            Bootstrapped cross-currency basis curve (M-104),
+                              or ``None`` when no XCCY_BASIS rows were present.
+            parity_checks:    Pillar-level parity check rows (built by the
+                              orchestrator from M-105 diagnostics).
+            conv:             FX convention block for the pair (M-102).
+            diagnostics:      List of domain Diagnostic records (collector
+                              snapshot at write time).
+            as_of_timestamp:  When the snapshot was produced. Defaults to
+                              ``datetime.now(UTC)``.
+
+        Returns:
+            Frozen :class:`FXSummary` instance.
+        """
+        if as_of_timestamp is None:
+            as_of_timestamp = datetime.now(tz=UTC)
+
+        forward_pillars = [
+            FXForwardPillarOut(
+                tenor_code=p.tenor_code,
+                tenor_days=p.tenor_days,
+                settle_date=p.settle_date,
+                forward_rate=p.forward_rate,
+            )
+            for p in forward.pillars_tuple
+        ]
+        basis_pillars = (
+            [
+                FXBasisPillarOut(
+                    tenor_code=p.tenor_code,
+                    tenor_days=p.tenor_days,
+                    maturity_date=p.maturity_date,
+                    spread_bps=p.spread_bps,
+                    quoted_on_foreign=basis.quoted_on_foreign,
+                )
+                for p in basis.pillars_tuple
+            ]
+            if basis is not None
+            else []
+        )
+        diagnostics_out = [
+            DiagnosticOut(
+                severity=d.severity.value,  # "WARN" | "ERROR"
+                code=d.code,
+                message=d.message,
+                context=d.context,
+            )
+            for d in diagnostics
+        ]
+        cfg = FXConfigSnapshot(
+            pair_code=conv.pair_code,
+            domestic_currency=pair.domestic,
+            foreign_currency=pair.foreign,
+            # QuoteConvention is a StrEnum ("direct" | "indirect"); Pydantic
+            # accepts the .value at the field boundary and validates the literal.
+            quote_convention=conv.quote_convention.value,
+            spot_lag_days=conv.spot_lag_days,
+            settlement_calendars=list(conv.settlement_calendars),
+            forward_point_scale=conv.forward_point_scale,
+        )
+
+        return cls(
+            schema_version=FX_SCHEMA_VERSION,
+            pair_code=pair.code,
+            valuation_date=valuation_date,
+            spot_date=forward.spot_date,
+            as_of_timestamp=as_of_timestamp,
+            spot_rate=forward.spot_rate,
+            forward_pillars=forward_pillars,
+            basis_pillars=basis_pillars,
+            parity_checks=parity_checks,
+            diagnostics=diagnostics_out,
+            config_snapshot=cfg,
+        )
 
 
 __all__ = [

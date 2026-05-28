@@ -15,11 +15,21 @@ import pytest
 
 from rates.io.persistence import (
     PARTITION_FILENAME,
+    fx_basis_to_table,
+    fx_forward_to_table,
     scenario_to_table,
+    write_fx_curve_partition,
+    write_fx_summary,
     write_partition,
     write_summary,
 )
-from rates.io.schemas import SCHEMA_VERSION, Summary
+from rates.io.schemas import (
+    FX_SCHEMA_VERSION,
+    SCHEMA_VERSION,
+    FXParityCheckRow,
+    FXSummary,
+    Summary,
+)
 
 # ---------------------------------------------------------------------------
 # Summary JSON
@@ -226,3 +236,256 @@ def test_write_partition_rejects_missing_columns(tmp_path):
     bad = pa.table({"index_date": pa.array([date(2026, 1, 1)], type=pa.date32())})
     with pytest.raises(ValueError, match="missing required columns"):
         write_partition(bad, tmp_path, date(2026, 1, 1))
+
+
+# ---------------------------------------------------------------------------
+# FX persistence (M-110, v0.3.0)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.phase8
+def test_fx_summary_from_domain_happy_path(
+    hand_fx_pair, hand_fx_conv, hand_fx_forward, hand_fx_basis, fx_valuation_date
+):
+    """FXSummary.from_domain wires every domain object into the persisted shape."""
+    summary = FXSummary.from_domain(
+        pair=hand_fx_pair,
+        valuation_date=fx_valuation_date,
+        forward=hand_fx_forward,
+        basis=hand_fx_basis,
+        parity_checks=[
+            FXParityCheckRow(
+                tenor_code="1M",
+                settle_date=date(2026, 7, 1),
+                quoted_forward=32.6355,
+                parity_forward=32.6354,
+                diff_bps_of_spot=0.03,
+            )
+        ],
+        conv=hand_fx_conv,
+        diagnostics=[],
+        as_of_timestamp=datetime(2026, 5, 28, 16, 30, tzinfo=UTC),
+    )
+
+    assert summary.schema_version == FX_SCHEMA_VERSION
+    assert summary.pair_code == "USDTRY"
+    assert summary.spot_date == hand_fx_forward.spot_date
+    assert summary.spot_rate == pytest.approx(hand_fx_forward.spot_rate)
+    assert len(summary.forward_pillars) == 3
+    assert len(summary.basis_pillars) == 2
+    assert all(bp.quoted_on_foreign is True for bp in summary.basis_pillars)
+    assert summary.config_snapshot.domestic_currency == "TRY"
+    assert summary.config_snapshot.foreign_currency == "USD"
+    assert summary.config_snapshot.quote_convention == "direct"
+    assert summary.config_snapshot.settlement_calendars == ["TR", "US"]
+
+
+@pytest.mark.phase8
+def test_fx_summary_from_domain_basis_none_yields_empty_list(
+    hand_fx_pair, hand_fx_conv, hand_fx_forward, fx_valuation_date
+):
+    """When no XCCY_BASIS rows are present, basis=None ⇒ basis_pillars == []."""
+    summary = FXSummary.from_domain(
+        pair=hand_fx_pair,
+        valuation_date=fx_valuation_date,
+        forward=hand_fx_forward,
+        basis=None,
+        parity_checks=[],
+        conv=hand_fx_conv,
+        diagnostics=[],
+    )
+    assert summary.basis_pillars == []
+    assert summary.parity_checks == []
+
+
+@pytest.mark.phase8
+def test_write_fx_summary_round_trip(
+    tmp_path, hand_fx_pair, hand_fx_conv, hand_fx_forward, hand_fx_basis, fx_valuation_date
+):
+    summary = FXSummary.from_domain(
+        pair=hand_fx_pair,
+        valuation_date=fx_valuation_date,
+        forward=hand_fx_forward,
+        basis=hand_fx_basis,
+        parity_checks=[],
+        conv=hand_fx_conv,
+        diagnostics=[],
+        as_of_timestamp=datetime(2026, 5, 28, 16, 30, tzinfo=UTC),
+    )
+    out = tmp_path / "latest" / "usdtry_fx_summary.json"
+    write_fx_summary(summary, out)
+
+    assert out.exists()
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == FX_SCHEMA_VERSION
+    assert payload["pair_code"] == "USDTRY"
+    assert payload["spot_rate"] == pytest.approx(32.4520)
+    # Indented (pretty) + trailing newline.
+    raw = out.read_text(encoding="utf-8")
+    assert raw.endswith("\n")
+    assert '\n  "pair_code"' in raw
+
+    # Round-trip equality.
+    rebuilt = FXSummary.model_validate_json(raw)
+    assert rebuilt == summary
+
+
+@pytest.mark.phase8
+def test_write_fx_summary_rejects_mismatched_schema_version(
+    tmp_path, hand_fx_pair, hand_fx_conv, hand_fx_forward, fx_valuation_date
+):
+    summary = FXSummary.from_domain(
+        pair=hand_fx_pair,
+        valuation_date=fx_valuation_date,
+        forward=hand_fx_forward,
+        basis=None,
+        parity_checks=[],
+        conv=hand_fx_conv,
+        diagnostics=[],
+    )
+    # Re-build with a deliberately wrong schema_version via model_copy.
+    bumped = summary.model_copy(update={"schema_version": FX_SCHEMA_VERSION + 1})
+    with pytest.raises(ValueError, match="refusing to write FXSummary"):
+        write_fx_summary(bumped, tmp_path / "out.json")
+
+
+@pytest.mark.phase8
+def test_write_fx_summary_atomic_overwrite_no_tmp_leftover(
+    tmp_path, hand_fx_pair, hand_fx_conv, hand_fx_forward, fx_valuation_date
+):
+    """Writing twice on the same path leaves no .tmp leftover and overwrites cleanly."""
+    summary = FXSummary.from_domain(
+        pair=hand_fx_pair,
+        valuation_date=fx_valuation_date,
+        forward=hand_fx_forward,
+        basis=None,
+        parity_checks=[],
+        conv=hand_fx_conv,
+        diagnostics=[],
+    )
+    out = tmp_path / "usdtry_fx_summary.json"
+    write_fx_summary(summary, out)
+    write_fx_summary(summary, out)
+    assert out.exists()
+    assert not out.with_suffix(out.suffix + ".tmp").exists()
+
+
+@pytest.mark.phase8
+def test_write_fx_curve_partition_forward_only(
+    tmp_path, hand_fx_pair, hand_fx_forward, fx_valuation_date
+):
+    """basis=None ⇒ only the forward partition is written."""
+    root = tmp_path / "fx_curves"
+    written = write_fx_curve_partition(
+        forward=hand_fx_forward,
+        basis=None,
+        root=root,
+        valuation_date=fx_valuation_date,
+        pair=hand_fx_pair,
+    )
+
+    assert "forward" in written
+    assert "basis" not in written
+    expected = (
+        root / "usdtry" / "forward" / f"date={fx_valuation_date.isoformat()}" / PARTITION_FILENAME
+    )
+    assert written["forward"] == expected
+    assert expected.exists()
+    table = pq.read_table(expected)  # type: ignore[no-untyped-call]
+    assert table.num_rows == 3
+    # pyarrow ≥15 auto-detects Hive partition keys (``date``) when reading a
+    # file inside a partition dir, so they appear as an extra column alongside
+    # the file's own schema. Assert the latter as a subset.
+    assert {"tenor_code", "tenor_days", "settle_date", "forward_rate"}.issubset(
+        set(table.column_names)
+    )
+
+
+@pytest.mark.phase8
+def test_write_fx_curve_partition_with_basis_writes_both(
+    tmp_path, hand_fx_pair, hand_fx_forward, hand_fx_basis, fx_valuation_date
+):
+    root = tmp_path / "fx_curves"
+    written = write_fx_curve_partition(
+        forward=hand_fx_forward,
+        basis=hand_fx_basis,
+        root=root,
+        valuation_date=fx_valuation_date,
+        pair=hand_fx_pair,
+    )
+    assert {"forward", "basis"} == set(written.keys())
+    fwd_table = pq.read_table(written["forward"])  # type: ignore[no-untyped-call]
+    bas_table = pq.read_table(written["basis"])  # type: ignore[no-untyped-call]
+    assert fwd_table.num_rows == 3
+    assert bas_table.num_rows == 2
+    # quoted_on_foreign broadcast across every basis row.
+    assert set(bas_table.column("quoted_on_foreign").to_pylist()) == {True}
+
+
+@pytest.mark.phase8
+def test_write_fx_curve_partition_overwrites_existing(
+    tmp_path, hand_fx_pair, hand_fx_forward, fx_valuation_date
+):
+    """Re-running on the same valuation_date wipes the partition directory."""
+    root = tmp_path / "fx_curves"
+    write_fx_curve_partition(
+        forward=hand_fx_forward,
+        basis=None,
+        root=root,
+        valuation_date=fx_valuation_date,
+        pair=hand_fx_pair,
+    )
+    # Plant a sentinel inside the partition dir to detect the wipe.
+    partition_dir = root / "usdtry" / "forward" / f"date={fx_valuation_date.isoformat()}"
+    sentinel = partition_dir / "stale.txt"
+    sentinel.write_text("stale")
+
+    write_fx_curve_partition(
+        forward=hand_fx_forward,
+        basis=None,
+        root=root,
+        valuation_date=fx_valuation_date,
+        pair=hand_fx_pair,
+    )
+    assert not sentinel.exists()
+    assert (partition_dir / PARTITION_FILENAME).exists()
+
+
+@pytest.mark.phase8
+def test_write_fx_curve_partition_readable_via_dataset(
+    tmp_path, hand_fx_pair, hand_fx_forward, hand_fx_basis, fx_valuation_date
+):
+    """Hive partitioning exposes the ``date`` partition key as a readable column."""
+    root = tmp_path / "fx_curves"
+    write_fx_curve_partition(
+        forward=hand_fx_forward,
+        basis=hand_fx_basis,
+        root=root,
+        valuation_date=fx_valuation_date,
+        pair=hand_fx_pair,
+    )
+    forward_root = root / "usdtry" / "forward"
+    dataset = ds.dataset(forward_root, format="parquet", partitioning="hive")
+    table = dataset.to_table()
+    assert "date" in table.column_names
+    assert set(table.column("date").to_pylist()) == {fx_valuation_date.isoformat()}
+
+
+@pytest.mark.phase8
+def test_fx_forward_to_table_schema(hand_fx_forward):
+    table = fx_forward_to_table(hand_fx_forward)
+    assert table.column_names == ["tenor_code", "tenor_days", "settle_date", "forward_rate"]
+    assert table.num_rows == 3
+
+
+@pytest.mark.phase8
+def test_fx_basis_to_table_schema(hand_fx_basis):
+    table = fx_basis_to_table(hand_fx_basis)
+    assert table.column_names == [
+        "tenor_code",
+        "tenor_days",
+        "maturity_date",
+        "spread_bps",
+        "quoted_on_foreign",
+    ]
+    assert table.num_rows == 2
