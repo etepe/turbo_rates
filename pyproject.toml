@@ -33,6 +33,8 @@ dev = [
     "ruff>=0.3",
     "types-pyyaml",
     "pandas-stubs",
+    "hypothesis>=6.0",
+    "openpyxl>=3.1",
 ]
 
 [project.scripts]
@@ -84,4 +86,5 @@ markers = [
     "phase3: Phase 3 scenario & report tests",
     "phase4: Phase 4 io & schemas tests",
     "phase5: Phase 5 integration tests",
+    "phase6: Phase 6 hardening — property-based invariants (Hypothesis)",
 ]
