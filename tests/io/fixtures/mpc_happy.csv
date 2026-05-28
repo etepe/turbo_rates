@@ -1,0 +1,5 @@
+# schema: v1
+meeting_date,bps_change,rationale
+2026-09-11,-250,first cut
+2026-12-18,-250,
+2027-03-19,-150,final cut

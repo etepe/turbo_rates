@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# Project data outputs (regenerable; not in git). We keep .gitkeep markers so the
+# directory layout survives a fresh clone — only generated artifacts are ignored.
+data/**/*.json
+data/**/*.parquet
+data/**/*.csv
+data/**/_metadata
+data/**/_common_metadata
+data/snapshots/*  # snapshots are user-supplied at runtime
+!data/snapshots/.gitkeep
+
+# Reference Excel files (binary, large; not committed)
+*.xlsm
+*.xlsx
+
+# Installer/binary artifacts
+*.dmg
+
+# Claude local state
+.claude/
+
+# Test / type / lint cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage

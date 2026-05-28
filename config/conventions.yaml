@@ -1,0 +1,30 @@
+# Market conventions for rates-engine.
+# Loaded by rates.core.conventions.Conventions.load() at pipeline start.
+# Pass the resulting Conventions object explicitly through every module — no globals.
+
+# ---------------------------------------------------------------------------
+# Per-currency OIS conventions.
+# Add a new currency block (USD, EUR, ...) when introducing it.
+# ---------------------------------------------------------------------------
+ois_conventions:
+  TRY:
+    day_count: Act/360                       # OIS swap accrual basis
+    business_day_convention: modified_following  # how to roll non-business pillar dates
+    calendar: TR                             # HolidayCalendar.for_currency('TR')
+    payment:
+      default_frequency: annual              # >1Y pillars use annual coupons
+      bullet_until: 1Y                       # <=1Y degenerates to single bullet payment
+
+# ---------------------------------------------------------------------------
+# TLREF index basis (separate from OIS).
+# Daily TLREF index in core.scenario uses this day-count for compounding.
+# ---------------------------------------------------------------------------
+tlref_convention:
+  day_count: Act/365
+
+# ---------------------------------------------------------------------------
+# Spread reporting (market vs scenario comparison, F-012).
+# Common basis used to express both rates so the spread is meaningful.
+# ---------------------------------------------------------------------------
+spread_reporting:
+  day_count: Act/365
