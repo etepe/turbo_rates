@@ -239,7 +239,12 @@ class Summary(BaseModel):
 
 #: FX summary schema version embedded in every FXSummary. Independent of
 #: SCHEMA_VERSION (V1 OIS) so the two can evolve separately.
-FX_SCHEMA_VERSION: int = 1
+#:
+#: v2 (M-109, V0.4): embeds the dom/for OIS pillar lists + per-ccy FXOisMeta and
+#: a per-basis-pillar strip residual so the persisted summary is the single audit
+#: record of which curves produced the stripped basis (DV-2 / D-16). New fields
+#: are appended; existing fields keep their order.
+FX_SCHEMA_VERSION: int = 2
 
 
 class FXForwardPillarOut(BaseModel):
@@ -263,6 +268,25 @@ class FXBasisPillarOut(BaseModel):
     maturity_date: date
     spread_bps: float
     quoted_on_foreign: bool
+    # |NPV(b_n*)| at strip time (D-13 reprice residual, v2). Phase 3 persists a
+    # 0.0 placeholder (the reprice assert already pins |NPV| < 1e-9); Phase 4
+    # (M-111) wires the real per-pillar values from the strip.
+    strip_residual: float
+
+
+class FXOisMeta(BaseModel):
+    """Per-currency OIS curve metadata for FXSummary v2 reconstruction (D-16).
+
+    Carries exactly the scalars an OIS curve needs to be rebuilt alongside its
+    persisted ``PillarOut`` list (C-110, Phase 4): the valuation date, the native
+    day-count, and the interpolation scheme.
+    """
+
+    model_config = _FROZEN
+
+    valuation_date: date
+    day_count: str          # OISCurve.day_count.value ("Act/360" | "Act/365")
+    interpolation: str      # OISCurve.interp ("log_linear_df" | "linear_zero")
 
 
 class FXParityCheckRow(BaseModel):
@@ -311,6 +335,12 @@ class FXSummary(BaseModel):
     parity_checks: list[FXParityCheckRow]
     diagnostics: list[DiagnosticOut]
     config_snapshot: FXConfigSnapshot
+    # v2 (M-109): dual OIS pillar lists + per-ccy meta for audit / MtM-readiness
+    # (D-16, A-8). Appended after the v1 fields to keep their order stable.
+    dom_ois_pillars: list[PillarOut]
+    for_ois_pillars: list[PillarOut]
+    dom_ois_meta: FXOisMeta
+    for_ois_meta: FXOisMeta
 
     @classmethod
     def from_domain(
@@ -323,9 +353,12 @@ class FXSummary(BaseModel):
         parity_checks: list[FXParityCheckRow],
         conv: FXConvention,
         diagnostics: list[Diagnostic],
+        dom_ois: OISCurve,
+        for_ois: OISCurve,
+        strip_residuals: dict[str, float],
         as_of_timestamp: datetime | None = None,
     ) -> FXSummary:
-        """Build an FXSummary from domain objects.
+        """Build an FXSummary from domain objects (C-102', schema v2).
 
         Args:
             pair:             Currency pair (drives domestic/foreign labels).
@@ -338,6 +371,13 @@ class FXSummary(BaseModel):
             conv:             FX convention block for the pair (M-102).
             diagnostics:      List of domain Diagnostic records (collector
                               snapshot at write time).
+            dom_ois:          Domestic OIS curve; its pillars + meta are embedded
+                              for audit / MtM-readiness (D-16, A-8).
+            for_ois:          Foreign OIS curve; embedded likewise.
+            strip_residuals:  Per-pillar ``tenor_code -> |NPV(b_n*)|`` strip
+                              residuals (D-13). A missing tenor maps to ``0.0``.
+                              Phase 3 passes an empty dict (placeholder); Phase 4
+                              (M-111) supplies the real values.
             as_of_timestamp:  When the snapshot was produced. Defaults to
                               ``datetime.now(UTC)``.
 
@@ -364,11 +404,44 @@ class FXSummary(BaseModel):
                     maturity_date=p.maturity_date,
                     spread_bps=p.spread_bps,
                     quoted_on_foreign=basis.quoted_on_foreign,
+                    strip_residual=strip_residuals.get(p.tenor_code, 0.0),
                 )
                 for p in basis.pillars_tuple
             ]
             if basis is not None
             else []
+        )
+        # OIS pillars reuse the V1 PillarOut model (D-16); same Pillar->PillarOut
+        # map as Summary.from_domain.
+        dom_ois_pillars = [
+            PillarOut(
+                tenor_code=p.tenor_code,
+                tenor_days=p.tenor_days,
+                end_date=p.end_date,
+                rate=p.rate,
+                discount_factor=p.discount_factor,
+            )
+            for p in dom_ois.pillars_tuple
+        ]
+        for_ois_pillars = [
+            PillarOut(
+                tenor_code=p.tenor_code,
+                tenor_days=p.tenor_days,
+                end_date=p.end_date,
+                rate=p.rate,
+                discount_factor=p.discount_factor,
+            )
+            for p in for_ois.pillars_tuple
+        ]
+        dom_ois_meta = FXOisMeta(
+            valuation_date=dom_ois.valuation_date,
+            day_count=dom_ois.day_count.value,
+            interpolation=dom_ois.interp,
+        )
+        for_ois_meta = FXOisMeta(
+            valuation_date=for_ois.valuation_date,
+            day_count=for_ois.day_count.value,
+            interpolation=for_ois.interp,
         )
         diagnostics_out = [
             DiagnosticOut(
@@ -403,6 +476,10 @@ class FXSummary(BaseModel):
             parity_checks=parity_checks,
             diagnostics=diagnostics_out,
             config_snapshot=cfg,
+            dom_ois_pillars=dom_ois_pillars,
+            for_ois_pillars=for_ois_pillars,
+            dom_ois_meta=dom_ois_meta,
+            for_ois_meta=for_ois_meta,
         )
 
 
@@ -415,6 +492,7 @@ __all__ = [
     "FXBasisPillarOut",
     "FXConfigSnapshot",
     "FXForwardPillarOut",
+    "FXOisMeta",
     "FXParityCheckRow",
     "FXSummary",
     "ForwardRow",

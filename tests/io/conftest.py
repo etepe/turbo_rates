@@ -63,6 +63,27 @@ def hand_curve(val_date) -> OISCurve:
 
 
 @pytest.fixture()
+def hand_for_curve(val_date) -> OISCurve:
+    """A second, distinct OIS curve (foreign leg) for FXSummary v2 round-trips.
+
+    Deliberately differs from ``hand_curve`` in pillars, day-count, and interp
+    so a dom/for swap in the persisted shape would be caught.
+    """
+    pillars = (
+        Pillar("USSO3M", 92, val_date, date(2026, 9, 14), 0.0525, 0.9869),
+        Pillar("USSO1Y", 367, val_date, date(2027, 6, 14), 0.0500, 0.9520),
+    )
+    ladder = (("1x3", date(2026, 7, 13), date(2026, 9, 14)),)
+    return OISCurve(
+        valuation_date=val_date,
+        day_count=DayCount.ACT_365,
+        interp="linear_zero",
+        pillars_tuple=pillars,
+        forward_ladder_dates=ladder,
+    )
+
+
+@pytest.fixture()
 def hand_scenario_with_band(val_date) -> ScenarioResult:
     """3-point business-day grid with both bands populated (for parquet long-format tests)."""
     dates = (val_date, date(2026, 6, 15), date(2026, 6, 16))

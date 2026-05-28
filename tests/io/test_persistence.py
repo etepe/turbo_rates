@@ -245,7 +245,13 @@ def test_write_partition_rejects_missing_columns(tmp_path):
 
 @pytest.mark.phase8
 def test_fx_summary_from_domain_happy_path(
-    hand_fx_pair, hand_fx_conv, hand_fx_forward, hand_fx_basis, fx_valuation_date
+    hand_fx_pair,
+    hand_fx_conv,
+    hand_fx_forward,
+    hand_fx_basis,
+    fx_valuation_date,
+    hand_curve,
+    hand_for_curve,
 ):
     """FXSummary.from_domain wires every domain object into the persisted shape."""
     summary = FXSummary.from_domain(
@@ -264,6 +270,9 @@ def test_fx_summary_from_domain_happy_path(
         ],
         conv=hand_fx_conv,
         diagnostics=[],
+        dom_ois=hand_curve,
+        for_ois=hand_for_curve,
+        strip_residuals={"1Y": 3.0e-12},
         as_of_timestamp=datetime(2026, 5, 28, 16, 30, tzinfo=UTC),
     )
 
@@ -279,10 +288,24 @@ def test_fx_summary_from_domain_happy_path(
     assert summary.config_snapshot.quote_convention == "direct"
     assert summary.config_snapshot.settlement_calendars == ["TR", "US"]
 
+    # v2: dual OIS pillars + per-ccy meta embedded from the supplied curves.
+    assert len(summary.dom_ois_pillars) == len(hand_curve.pillars_tuple)
+    assert len(summary.for_ois_pillars) == len(hand_for_curve.pillars_tuple)
+    assert summary.dom_ois_meta.day_count == "Act/360"
+    assert summary.dom_ois_meta.interpolation == "log_linear_df"
+    assert summary.for_ois_meta.day_count == "Act/365"
+    assert summary.for_ois_meta.interpolation == "linear_zero"
+    assert summary.dom_ois_meta.valuation_date == hand_curve.valuation_date
+
+    # v2: strip residual maps per basis pillar tenor; absent tenors default to 0.0.
+    residual_by_tenor = {bp.tenor_code: bp.strip_residual for bp in summary.basis_pillars}
+    assert residual_by_tenor["1Y"] == pytest.approx(3.0e-12)
+    assert residual_by_tenor["2Y"] == 0.0
+
 
 @pytest.mark.phase8
 def test_fx_summary_from_domain_basis_none_yields_empty_list(
-    hand_fx_pair, hand_fx_conv, hand_fx_forward, fx_valuation_date
+    hand_fx_pair, hand_fx_conv, hand_fx_forward, fx_valuation_date, hand_curve, hand_for_curve
 ):
     """When no XCCY_BASIS rows are present, basis=None ⇒ basis_pillars == []."""
     summary = FXSummary.from_domain(
@@ -293,6 +316,9 @@ def test_fx_summary_from_domain_basis_none_yields_empty_list(
         parity_checks=[],
         conv=hand_fx_conv,
         diagnostics=[],
+        dom_ois=hand_curve,
+        for_ois=hand_for_curve,
+        strip_residuals={},
     )
     assert summary.basis_pillars == []
     assert summary.parity_checks == []
@@ -300,7 +326,14 @@ def test_fx_summary_from_domain_basis_none_yields_empty_list(
 
 @pytest.mark.phase8
 def test_write_fx_summary_round_trip(
-    tmp_path, hand_fx_pair, hand_fx_conv, hand_fx_forward, hand_fx_basis, fx_valuation_date
+    tmp_path,
+    hand_fx_pair,
+    hand_fx_conv,
+    hand_fx_forward,
+    hand_fx_basis,
+    fx_valuation_date,
+    hand_curve,
+    hand_for_curve,
 ):
     summary = FXSummary.from_domain(
         pair=hand_fx_pair,
@@ -310,6 +343,9 @@ def test_write_fx_summary_round_trip(
         parity_checks=[],
         conv=hand_fx_conv,
         diagnostics=[],
+        dom_ois=hand_curve,
+        for_ois=hand_for_curve,
+        strip_residuals={},
         as_of_timestamp=datetime(2026, 5, 28, 16, 30, tzinfo=UTC),
     )
     out = tmp_path / "latest" / "usdtry_fx_summary.json"
@@ -332,7 +368,13 @@ def test_write_fx_summary_round_trip(
 
 @pytest.mark.phase8
 def test_write_fx_summary_rejects_mismatched_schema_version(
-    tmp_path, hand_fx_pair, hand_fx_conv, hand_fx_forward, fx_valuation_date
+    tmp_path,
+    hand_fx_pair,
+    hand_fx_conv,
+    hand_fx_forward,
+    fx_valuation_date,
+    hand_curve,
+    hand_for_curve,
 ):
     summary = FXSummary.from_domain(
         pair=hand_fx_pair,
@@ -342,6 +384,9 @@ def test_write_fx_summary_rejects_mismatched_schema_version(
         parity_checks=[],
         conv=hand_fx_conv,
         diagnostics=[],
+        dom_ois=hand_curve,
+        for_ois=hand_for_curve,
+        strip_residuals={},
     )
     # Re-build with a deliberately wrong schema_version via model_copy.
     bumped = summary.model_copy(update={"schema_version": FX_SCHEMA_VERSION + 1})
@@ -351,7 +396,13 @@ def test_write_fx_summary_rejects_mismatched_schema_version(
 
 @pytest.mark.phase8
 def test_write_fx_summary_atomic_overwrite_no_tmp_leftover(
-    tmp_path, hand_fx_pair, hand_fx_conv, hand_fx_forward, fx_valuation_date
+    tmp_path,
+    hand_fx_pair,
+    hand_fx_conv,
+    hand_fx_forward,
+    fx_valuation_date,
+    hand_curve,
+    hand_for_curve,
 ):
     """Writing twice on the same path leaves no .tmp leftover and overwrites cleanly."""
     summary = FXSummary.from_domain(
@@ -362,12 +413,84 @@ def test_write_fx_summary_atomic_overwrite_no_tmp_leftover(
         parity_checks=[],
         conv=hand_fx_conv,
         diagnostics=[],
+        dom_ois=hand_curve,
+        for_ois=hand_for_curve,
+        strip_residuals={},
     )
     out = tmp_path / "usdtry_fx_summary.json"
     write_fx_summary(summary, out)
     write_fx_summary(summary, out)
     assert out.exists()
     assert not out.with_suffix(out.suffix + ".tmp").exists()
+
+
+@pytest.mark.phase9
+def test_fx_summary_v2_round_trip_preserves_ois_and_residuals(
+    tmp_path,
+    hand_fx_pair,
+    hand_fx_conv,
+    hand_fx_forward,
+    hand_fx_basis,
+    fx_valuation_date,
+    hand_curve,
+    hand_for_curve,
+):
+    """FXSummary v2 survives from_domain -> write_fx_summary -> deserialize.
+
+    Asserts the new v2 payload (dual OIS pillar lists + per-ccy meta +
+    per-pillar strip residual + schema_version==2) round-trips intact. The OIS
+    curves themselves are NOT reconstructed here — that adapter is C-110 / Phase
+    4; this test only pins the persisted shape.
+    """
+    strip_residuals = {"1Y": 4.2e-12, "2Y": 0.0}
+    summary = FXSummary.from_domain(
+        pair=hand_fx_pair,
+        valuation_date=fx_valuation_date,
+        forward=hand_fx_forward,
+        basis=hand_fx_basis,
+        parity_checks=[],
+        conv=hand_fx_conv,
+        diagnostics=[],
+        dom_ois=hand_curve,
+        for_ois=hand_for_curve,
+        strip_residuals=strip_residuals,
+        as_of_timestamp=datetime(2026, 5, 28, 16, 30, tzinfo=UTC),
+    )
+
+    out = tmp_path / "latest" / "usdtry_fx_summary.json"
+    write_fx_summary(summary, out)
+    parsed = FXSummary.model_validate_json(out.read_text(encoding="utf-8"))
+
+    assert parsed.schema_version == 2
+
+    # Dual OIS pillar lists survive, in order, with values intact.
+    assert [p.tenor_code for p in parsed.dom_ois_pillars] == [
+        p.tenor_code for p in hand_curve.pillars_tuple
+    ]
+    assert [p.tenor_code for p in parsed.for_ois_pillars] == [
+        p.tenor_code for p in hand_for_curve.pillars_tuple
+    ]
+    assert parsed.dom_ois_pillars[0].discount_factor == pytest.approx(
+        hand_curve.pillars_tuple[0].discount_factor
+    )
+    assert parsed.for_ois_pillars[-1].rate == pytest.approx(
+        hand_for_curve.pillars_tuple[-1].rate
+    )
+
+    # Per-ccy meta survives and is not swapped between dom/for.
+    assert parsed.dom_ois_meta.valuation_date == hand_curve.valuation_date
+    assert parsed.dom_ois_meta.day_count == hand_curve.day_count.value
+    assert parsed.dom_ois_meta.interpolation == hand_curve.interp
+    assert parsed.for_ois_meta.day_count == hand_for_curve.day_count.value
+    assert parsed.for_ois_meta.interpolation == hand_for_curve.interp
+
+    # Per-pillar strip residual survives (mapped by tenor_code; 0.0 elsewhere).
+    residual_by_tenor = {bp.tenor_code: bp.strip_residual for bp in parsed.basis_pillars}
+    assert residual_by_tenor["1Y"] == pytest.approx(4.2e-12)
+    assert residual_by_tenor["2Y"] == 0.0
+
+    # Full structural round-trip equality.
+    assert parsed == summary
 
 
 @pytest.mark.phase8
