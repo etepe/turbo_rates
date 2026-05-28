@@ -87,4 +87,5 @@ markers = [
     "phase4: Phase 4 io & schemas tests",
     "phase5: Phase 5 integration tests",
     "phase6: Phase 6 hardening — property-based invariants (Hypothesis)",
+    "phase7: Phase 7 V2 FX layer (scaffold; most bodies deferred to V2)",
 ]
