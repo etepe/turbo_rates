@@ -3,7 +3,7 @@
 **Domain:** quant
 **Depth:** derin
 **Date:** 2026-05-28
-**Status:** Validated (2026-05-28)
+**Status:** Validated + grill-passed (2026-05-28) — all OQ-401..OQ-406 resolved (D-11..D-17)
 **Ticket:** MON-019
 **Based on:** `docs/fx-architecture.md` (V2 FX math layer, M-101..M-107),
 `docs/fx-io-architecture.md` (v0.3.0 IO/CLI/app wiring, §11 V3 deferral),
@@ -241,8 +241,17 @@ Engineering NFRs (project-standard gates):
 - **D-6** Solver: **scipy brentq** (bracketing), reprice tolerance **1e-9** (matches `FX_FORWARD_REPRICE_TOLERANCE`, looser than OIS 1e-10).
 - **D-7** Spread placement: **`quoted_on_foreign`** (foreign/USD leg, FX-O5) — unchanged.
 - **D-8** Coupon schedule: **quarterly (3M)** for both xccy legs — new generator, deviation from V1 annual/bullet reuse.
-- **D-9** FX forward curve is consumed for its **spot anchor** (constant-notional PV needs only spot; full forward strip reserved for MtM extension).
-- **D-10** Smoke gate: **reprice to 1e-9 + zero `FX_PARITY_MISMATCH`**, fixture `--regenerate`d to V3-consistency.
+- **D-9** *(superseded by D-11 — grill 2026-05-28)* ~~FX forward curve consumed for spot anchor only.~~ The spot-only anchor degenerates the strip to `s = 0`; D-11 now consumes the **full** FX forward curve.
+- **D-10** Smoke gate: **reprice to 1e-9 + zero `FX_PARITY_MISMATCH`** (now basis-aware per D-12), fixture `--regenerate`d to V3-consistency.
+
+**Modeling decisions (added by grill 2026-05-28 — resolve OQ-401..OQ-406)**
+- **D-11** Strip equation = **Method (i)**: foreign-leg cashflows are converted to domestic at the **full FX forward curve** (not spot). The xccy basis ≡ the market forwards' deviation from CIP. Resolves OQ-401; supersedes D-9. D-4/D-5 stay intact.
+- **D-12** `FX_PARITY_MISMATCH` becomes a **basis-aware reprice gate**: parity target is `S·DF_for/DF_dom` adjusted by the stripped basis; it fires only on genuine forward-vs-(CIP+basis) inconsistency. Resolves OQ-402 and F-307.
+- **D-13** Strip = **sequential par→pillar bootstrap** (`b_n` solved with `b_1..b_{n-1}` fixed). Each step is closed-form linear, but **brentq is retained** (D-6 unchanged) for V1-pattern consistency and MtM-readiness; closed-form was considered and rejected. Reprice assert `|NPV(s*)| < 1e-9` → `FX_XCCY_REPRICE_FAIL` on breach. Resolves F-301 mechanics.
+- **D-14** Quarterly schedule: **single common Act/360** day-count on both legs + **back stub**. The TRY-leg Act/360 (vs its native OIS day-count) is a **documented simplification**. Resolves OQ-403.
+- **D-15** FX forwards interpolated to quarterly coupon dates via **M-103 log-linear in log(F/S)** (reuse `FXForwardCurve.forward_at`). Resolves OQ-405.
+- **D-16** FXSummary v2 OIS persistence = **V1 `PillarOut` embedded twice** (`dom_ois_pillars` / `for_ois_pillars`) + a per-ccy meta block (valuation_date, day_count, interpolation) for exact `_curve_from_summary`-style reconstruction. Resolves OQ-404.
+- **D-17** EURTRY uses the **same code path** (no special-casing); V0.4 fixture/smoke is **USDTRY-only**, EURTRY exercised by unit tests. Resolves OQ-406.
 
 **Assumptions**
 - The xccy basis swap is floating-floating, par notional, with notional
@@ -267,19 +276,24 @@ Engineering NFRs (project-standard gates):
 
 ---
 
-## 7. Open Questions
+## 7. Open Questions — all RESOLVED (grill-me, 2026-05-28)
 
-> Ordered by criticality. **OQ-401 is the central technical risk** and must be
-> resolved by the architecture stage (it will be hammered in grill-me).
+> All six open questions were resolved in the grill stress-test. The central
+> risk (OQ-401) drove decisions D-11..D-12; the rest map to D-13..D-17.
 
-| ID | Question | Why it matters |
-|----|----------|----------------|
-| **OQ-401** | **CIP-consistency of the strip.** Under D-4/D-5/D-9 (constant-notional, single-curve, convert-at-spot), each plain floating leg with notional exchange telescopes to par on its own curve, so the par xccy swap's net PV reduces to `-N_dom * s * A_for` and the strip yields **s = 0**. A non-zero arbitrage-free basis is mathematically equivalent to FX forwards deviating from CIP — but the v0.3.0 fixture is *parity-tight* (zero `FX_PARITY_MISMATCH`) **and** carries a constant −180 bps basis, which is internally inconsistent under any arbitrage-free model. **Resolution needed:** where does the non-zero basis enter the PV equation? Candidates: (i) convert foreign cashflows at FX *forwards* (basis = forward-vs-CIP deviation; then forwards must deviate from CIP and the fixture's −180 basis ⟺ forwards that *would* trip the current parity check); (ii) discount the foreign leg on a basis-adjusted curve (the deferred D-5 option — would have to be partially un-deferred); (iii) redefine the strip target so the basis spread is the per-pillar adjustment that re-prices the *market FX forward* against OIS discounting. | Determines the entire stripping equation, whether the fixture keeps −180 or moves to ~0, and whether M-105's parity check must become basis-aware (F-307). Get this wrong and the strip is either trivially zero or not arbitrage-free. |
-| OQ-402 | **Parity-check semantics (F-307).** Once a non-zero basis exists, should `FX_PARITY_MISMATCH` compare quoted forwards against *basis-adjusted* parity rather than pure CIP? Or do the FX forward and xccy basis surfaces stay decoupled (forwards short-end, basis long-end) with documented non-overlap? | Drives whether the parity WARN is still meaningful and how the fixture is constructed. Tied to OQ-401. |
-| OQ-403 | **Quarterly schedule day-count / stub.** Does the 3M xccy schedule accrue on each leg's OIS day-count (Act/360 USD, Act/365 or Act/360 TRY)? Front or back stub for non-integer-quarter maturities? | Affects the basis annuity `A` and therefore the stripped spread. |
-| OQ-404 | **OIS pillar persistence shape in FXSummary v2.** Reuse the V1 `Summary` pillar model (`PillarOut`) embedded twice (dom/for), or a leaner FX-specific OIS pillar row? Carry interpolation scheme + day-count so `_curve_from_summary`-style reconstruction is exact. | Determines schema v2 fields and reconstruction fidelity. |
-| OQ-405 | **Interpolation of the stripped basis between pillars.** Keep the M-104 piecewise-linear-on-bps interpolation, or interpolate on a strip-implied quantity (e.g. basis-adjusted DF)? | Affects `price_xccy_basis_swap` for non-pillar maturities (FX-O2 revisited). |
-| OQ-406 | **EURTRY coverage.** Same code path as USDTRY (no special-casing), or USDTRY-only fixture/tests in V0.4 with EURTRY exercised only by unit tests? | Scope/test surface. |
+| ID | Question | Resolution | Decision |
+|----|----------|-----------|----------|
+| **OQ-401** | **CIP-consistency of the strip.** Under D-4/D-5/D-9 the par xccy swap net PV reduces to `-N_dom·s·A_for`, so the strip yields **s = 0** — yet a non-zero arbitrage-free basis ⟺ FX forwards deviating from CIP, conflicting with the parity-tight −180 bps fixture. | **Method (i)**: convert foreign-leg cashflows at the **full FX forward curve**; basis ≡ forward-vs-CIP deviation. D-9 superseded. | **D-11** |
+| OQ-402 | **Parity-check semantics (F-307).** Should `FX_PARITY_MISMATCH` compare against basis-adjusted parity or pure CIP? | **Basis-aware reprice gate**: parity target adjusted by stripped basis; fires only on genuine inconsistency. | **D-12** |
+| OQ-403 | **Quarterly schedule day-count / stub.** | **Single common Act/360 + back stub**; TRY-leg Act/360 is a documented simplification. | **D-14** |
+| OQ-404 | **OIS pillar persistence shape in FXSummary v2.** | **Reuse V1 `PillarOut` ×2 + per-ccy meta block** (valuation_date, day_count, interpolation). | **D-16** |
+| OQ-405 | **Interpolation of FX forwards to quarterly coupon dates.** | **M-103 log-linear in log(F/S)** (reuse `forward_at`). | **D-15** |
+| OQ-406 | **EURTRY coverage.** | **Same code path; USDTRY-only fixture/smoke**, EURTRY by unit tests. | **D-17** |
+
+**Strip mechanics (OQ-401 follow-ups, resolved):** the strip is a **sequential
+par→pillar bootstrap**; each step is closed-form linear in `s`, but **brentq is
+retained** (D-6/D-13) for V1-pattern consistency and MtM-readiness, guarded by a
+reprice assert (`|NPV(s*)| < 1e-9` → `FX_XCCY_REPRICE_FAIL`).
 
 ---
 
