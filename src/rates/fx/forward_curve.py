@@ -13,6 +13,7 @@ Contracts: C-103 (consumer); receives output from C-102.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -85,7 +86,6 @@ class FXForwardCurve:
 
         Raises:
             ValueError: When ``settle_date`` is out of range.
-            NotImplementedError: V2 — interpolation not yet implemented.
         """
         if settle_date < self.spot_date:
             raise ValueError(
@@ -96,7 +96,35 @@ class FXForwardCurve:
             raise ValueError(
                 f"DateOutOfRange: {settle_date} is after last pillar settle_date {last}"
             )
-        raise NotImplementedError("V2: FXForwardCurve.forward_at interpolation")
+        if settle_date == self.spot_date:
+            return self.spot_rate
+
+        # Bracket the target between two knots, treating (spot_date, spot_rate)
+        # as the implicit zeroth knot. Interpolation is log-linear in log(F/S)
+        # weighted by calendar days.
+        a_date: date = self.spot_date
+        a_rate: float = self.spot_rate
+        b_date: date = self.pillars_tuple[0].settle_date
+        b_rate: float = self.pillars_tuple[0].forward_rate
+        for i in range(1, len(self.pillars_tuple)):
+            left = self.pillars_tuple[i - 1]
+            right = self.pillars_tuple[i]
+            if left.settle_date <= settle_date <= right.settle_date:
+                a_date, a_rate = left.settle_date, left.forward_rate
+                b_date, b_rate = right.settle_date, right.forward_rate
+                break
+
+        if settle_date == a_date:
+            return a_rate
+        if settle_date == b_date:
+            return b_rate
+
+        days_total = (b_date - a_date).days
+        days_to_d = (settle_date - a_date).days
+        w = days_to_d / days_total
+        log_a = math.log(a_rate / self.spot_rate)
+        log_b = math.log(b_rate / self.spot_rate)
+        return self.spot_rate * math.exp((1.0 - w) * log_a + w * log_b)
 
     def pillars(self) -> pd.DataFrame:
         """Pillar table as a fresh DataFrame (defensive copy, safe to mutate)."""
