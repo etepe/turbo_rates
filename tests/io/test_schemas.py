@@ -22,6 +22,7 @@ from rates.io.schemas import (
     FXBasisPillarOut,
     FXConfigSnapshot,
     FXForwardPillarOut,
+    FXOisMeta,
     FXParityCheckRow,
     FXSummary,
     PillarOut,
@@ -251,7 +252,7 @@ def test_model_json_schema_has_top_level_fields():
 
 @pytest.mark.phase8
 def test_fx_schema_version_constant() -> None:
-    assert FX_SCHEMA_VERSION == 1
+    assert FX_SCHEMA_VERSION == 2
 
 
 @pytest.mark.phase8
@@ -281,6 +282,7 @@ def test_fx_summary_round_trip() -> None:
                 maturity_date=date(2027, 6, 1),
                 spread_bps=-180.0,
                 quoted_on_foreign=True,
+                strip_residual=0.0,
             )
         ],
         parity_checks=[
@@ -303,6 +305,34 @@ def test_fx_summary_round_trip() -> None:
             spot_lag_days=2,
             settlement_calendars=["TR", "US"],
             forward_point_scale=10000,
+        ),
+        dom_ois_pillars=[
+            PillarOut(
+                tenor_code="TYSO1Y",
+                tenor_days=365,
+                end_date=date(2027, 5, 28),
+                rate=0.42,
+                discount_factor=0.70,
+            )
+        ],
+        for_ois_pillars=[
+            PillarOut(
+                tenor_code="USSO1Y",
+                tenor_days=365,
+                end_date=date(2027, 5, 28),
+                rate=0.05,
+                discount_factor=0.952,
+            )
+        ],
+        dom_ois_meta=FXOisMeta(
+            valuation_date=date(2026, 5, 28),
+            day_count="Act/360",
+            interpolation="log_linear_df",
+        ),
+        for_ois_meta=FXOisMeta(
+            valuation_date=date(2026, 5, 28),
+            day_count="Act/365",
+            interpolation="linear_zero",
         ),
     )
 
@@ -335,6 +365,18 @@ def test_fx_summary_forbids_extra_fields() -> None:
             "spot_lag_days": 2,
             "settlement_calendars": ["TR", "US"],
             "forward_point_scale": 10000,
+        },
+        "dom_ois_pillars": [],
+        "for_ois_pillars": [],
+        "dom_ois_meta": {
+            "valuation_date": date(2026, 5, 28),
+            "day_count": "Act/360",
+            "interpolation": "log_linear_df",
+        },
+        "for_ois_meta": {
+            "valuation_date": date(2026, 5, 28),
+            "day_count": "Act/365",
+            "interpolation": "linear_zero",
         },
         # unexpected:
         "rogue_field": "boo",

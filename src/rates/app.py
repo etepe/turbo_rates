@@ -294,7 +294,7 @@ def run_fx_bootstrap(args: argparse.Namespace) -> int:
     if result is None:
         return _print_exit(dg, args)
 
-    pair, fx_conv, fx_forward, basis, as_of = result
+    pair, fx_conv, fx_forward, basis, as_of, dom_curve, for_curve = result
     parity_checks = _parity_checks_from_diagnostics(dg, fx_forward)
     summary = FXSummary.from_domain(
         pair=pair,
@@ -304,6 +304,12 @@ def run_fx_bootstrap(args: argparse.Namespace) -> int:
         parity_checks=parity_checks,
         conv=fx_conv,
         diagnostics=dg.to_list(),
+        dom_ois=dom_curve,
+        for_ois=for_curve,
+        # Phase 3 placeholder: the strip's reprice assert already pins
+        # |NPV| < 1e-9, so the persisted residual is ~0 by construction. Phase 4
+        # (M-111) wires the real per-pillar values out of the strip.
+        strip_residuals={},
     )
 
     output_root = Path(getattr(args, "output_root", Path(".")))
@@ -606,6 +612,8 @@ def _run_fx_pipeline(
         FXForwardCurve,
         CrossCurrencyBasisCurve | None,
         date,
+        OISCurve,
+        OISCurve,
     ]
     | None
 ):
@@ -618,7 +626,9 @@ def _run_fx_pipeline(
 
     Returns:
         ``(pair, fx_convention, fx_forward_curve, basis_curve_or_None,
-        as_of_date)`` on success; ``None`` on any failure.
+        as_of_date, dom_ois_curve, for_ois_curve)`` on success; ``None`` on any
+        failure. The two OIS curves are surfaced so the persistence call site can
+        embed them into FXSummary v2 (D-16, A-8).
     """
     try:
         conv = Conventions.load(
@@ -738,7 +748,7 @@ def _run_fx_pipeline(
             )
             return None
 
-    return pair, fx_conv, fx_forward, basis, as_of
+    return pair, fx_conv, fx_forward, basis, as_of, dom_curve, for_curve
 
 
 def _fx_summary_filename(pair: CurrencyPair) -> str:
