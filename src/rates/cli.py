@@ -1,6 +1,6 @@
-"""rates.cli — argparse entry point (M-015).
+"""rates.cli — argparse entry point (M-015, M-112).
 
-Three subcommands, each a thin (<30 LoC body) delegate to :mod:`rates.app`:
+V1 OIS subcommands (M-015), each a thin (<30 LoC body) delegate to :mod:`rates.app`:
 
     rates bootstrap [--snapshot PATH] [--mpc-path PATH] [--band N]
                     [--interp {log_linear_df,linear_zero}] [--quiet]
@@ -11,10 +11,25 @@ Three subcommands, each a thin (<30 LoC body) delegate to :mod:`rates.app`:
                    [--convention-override KEY=VALUE]
     rates forward  --start YYYY-MM-DD --end YYYY-MM-DD [--summary-path PATH]
 
+v0.3.0 FX subcommands (M-112) — nested `rates fx <verb>` per architecture D3.
+The shared FX shape ``--pair / --as-of / --conventions-yaml / --output-root
+/ --quiet / --convention-override`` lives on every verb:
+
+    rates fx diagnose --pair PAIR --as-of YYYY-MM-DD
+                      [--fx-snapshot PATH] [--domestic-snapshot PATH]
+                      [--foreign-snapshot PATH]
+    rates fx bootstrap          (same as diagnose, plus persistence side effect)
+    rates fx price-outright --pair PAIR --as-of YYYY-MM-DD
+                            (--tenor TENOR | --value-date YYYY-MM-DD)
+    rates fx price-swap     --pair PAIR --as-of YYYY-MM-DD
+                            (--near-tenor TENOR | --near-value-date YYYY-MM-DD)
+                            (--far-tenor TENOR  | --far-value-date YYYY-MM-DD)
+    rates fx price-xccy     --pair PAIR --as-of YYYY-MM-DD --tenor TENOR
+
 Stdlib argparse — no extra dependency. Entry point declared in pyproject.toml:
 ``rates = "rates.cli:main"``.
 
-Contract: C-013.
+Contract: C-013 (V1 OIS), C-103 (v0.3.0 FX).
 """
 
 from __future__ import annotations
@@ -24,7 +39,16 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from rates.app import run_bootstrap, run_diagnose, run_forward
+from rates.app import (
+    run_bootstrap,
+    run_diagnose,
+    run_forward,
+    run_fx_bootstrap,
+    run_fx_diagnose,
+    run_fx_price_outright,
+    run_fx_price_swap,
+    run_fx_price_xccy,
+)
 
 _DEFAULT_SNAPSHOT_DIR: Path = Path("data/snapshots")
 _DEFAULT_MPC_PATH: Path = Path("config/mpc_path.csv")
@@ -52,6 +76,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_bootstrap_parser(sub)
     _add_diagnose_parser(sub)
     _add_forward_parser(sub)
+    _add_fx_parser(sub)
     return parser
 
 
@@ -91,6 +116,107 @@ def _add_forward_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]
     p.set_defaults(func=_forward_command)
 
 
+def _add_fx_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Wire the nested `rates fx <verb>` subcommand tree (M-112)."""
+    fx = sub.add_parser("fx", help="FX layer: dual-curve bootstrap + ad-hoc pricing.")
+    fx_sub = fx.add_subparsers(dest="fx_command", required=True)
+
+    _add_fx_diagnose_parser(fx_sub)
+    _add_fx_bootstrap_parser(fx_sub)
+    _add_fx_price_outright_parser(fx_sub)
+    _add_fx_price_swap_parser(fx_sub)
+    _add_fx_price_xccy_parser(fx_sub)
+
+
+def _add_fx_shared(p: argparse.ArgumentParser, *, persistence: bool) -> None:
+    """Attach the FX-shared args common to every `rates fx <verb>` verb (C-103).
+
+    Args:
+        p:            Subparser to mutate.
+        persistence:  When True, attaches ``--output-root`` (diagnose verbs
+                      that never write outputs still accept it harmlessly,
+                      but we keep the surface tight per architecture §4).
+    """
+    p.add_argument("--pair", required=True, help="6-letter ISO pair, e.g. USDTRY.")
+    p.add_argument("--as-of", dest="as_of", type=date.fromisoformat, required=True)
+    p.add_argument("--conventions-yaml", type=Path, default=_DEFAULT_CONVENTIONS_YAML)
+    p.add_argument("--convention-override", action="append", default=None)
+    p.add_argument("--quiet", action="store_true")
+    if persistence:
+        p.add_argument("--output-root", type=Path, default=Path("."))
+
+
+def _add_fx_snapshot_args(p: argparse.ArgumentParser) -> None:
+    """Attach `--fx-snapshot / --domestic-snapshot / --foreign-snapshot` overrides."""
+    p.add_argument("--fx-snapshot", dest="fx_snapshot", type=Path, default=None)
+    p.add_argument(
+        "--domestic-snapshot", dest="domestic_snapshot", type=Path, default=None
+    )
+    p.add_argument(
+        "--foreign-snapshot", dest="foreign_snapshot", type=Path, default=None
+    )
+
+
+def _add_fx_diagnose_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "diagnose",
+        help="Full FX pipeline through parity check; no outputs written.",
+    )
+    _add_fx_shared(p, persistence=False)
+    _add_fx_snapshot_args(p)
+    p.set_defaults(func=_fx_diagnose_command)
+
+
+def _add_fx_bootstrap_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "bootstrap",
+        help="Full FX pipeline + persist summary JSON and curve Parquet partitions.",
+    )
+    _add_fx_shared(p, persistence=True)
+    _add_fx_snapshot_args(p)
+    p.set_defaults(func=_fx_bootstrap_command)
+
+
+def _add_fx_price_outright_parser(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    p = sub.add_parser(
+        "price-outright", help="Price an outright forward from the latest FX summary."
+    )
+    _add_fx_shared(p, persistence=True)
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument("--tenor", dest="tenor_code", default=None)
+    group.add_argument("--value-date", dest="value_date", type=date.fromisoformat, default=None)
+    p.set_defaults(func=_fx_price_outright_command)
+
+
+def _add_fx_price_swap_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "price-swap", help="Price an FX swap (near + far) from the latest FX summary."
+    )
+    _add_fx_shared(p, persistence=True)
+    near = p.add_mutually_exclusive_group(required=True)
+    near.add_argument("--near-tenor", dest="near_tenor", default=None)
+    near.add_argument(
+        "--near-value-date", dest="near_value_date", type=date.fromisoformat, default=None
+    )
+    far = p.add_mutually_exclusive_group(required=True)
+    far.add_argument("--far-tenor", dest="far_tenor", default=None)
+    far.add_argument(
+        "--far-value-date", dest="far_value_date", type=date.fromisoformat, default=None
+    )
+    p.set_defaults(func=_fx_price_swap_command)
+
+
+def _add_fx_price_xccy_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "price-xccy", help="Price a cross-currency basis swap (tenor-keyed)."
+    )
+    _add_fx_shared(p, persistence=True)
+    p.add_argument("--tenor", dest="tenor_code", required=True)
+    p.set_defaults(func=_fx_price_xccy_command)
+
+
 # ---------------------------------------------------------------------------
 # Subcommand bodies (<30 LoC each per F-009)
 # ---------------------------------------------------------------------------
@@ -115,6 +241,26 @@ def _diagnose_command(args: argparse.Namespace) -> int:
 
 def _forward_command(args: argparse.Namespace) -> int:
     return run_forward(args)
+
+
+def _fx_diagnose_command(args: argparse.Namespace) -> int:
+    return run_fx_diagnose(args)
+
+
+def _fx_bootstrap_command(args: argparse.Namespace) -> int:
+    return run_fx_bootstrap(args)
+
+
+def _fx_price_outright_command(args: argparse.Namespace) -> int:
+    return run_fx_price_outright(args)
+
+
+def _fx_price_swap_command(args: argparse.Namespace) -> int:
+    return run_fx_price_swap(args)
+
+
+def _fx_price_xccy_command(args: argparse.Namespace) -> int:
+    return run_fx_price_xccy(args)
 
 
 # ---------------------------------------------------------------------------
