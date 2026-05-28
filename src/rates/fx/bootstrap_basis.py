@@ -1,50 +1,106 @@
-"""rates.fx.bootstrap_basis — cross-currency basis bootstrap (M-106).
+"""rates.fx.bootstrap_basis — cross-currency basis strip (M-106, V0.4).
 
-Strips a :class:`CrossCurrencyBasisCurve` from a vector of xccy par-swap
-basis quotes, using the dual OIS curves and the already-bootstrapped FX
-forward curve as anchors. The basis is a per-tenor spread (bps) that, when
-added to the leg quoted on (FX-O5: USD-leg by default), re-prices the xccy
-swap to par.
+Strips a :class:`CrossCurrencyBasisCurve` from a vector of par xccy basis-swap
+quotes by **Method (i)** (D-11): each pillar is calibrated so a constant-notional
+float-float xccy swap maturing at the quoted tenor re-prices to net PV = 0, with
+the foreign leg's cashflows converted to domestic units at the **full FX forward
+curve** and discounted on the **domestic OIS** curve.
 
-V2 takes quoted spreads verbatim and surfaces consistency issues as
-diagnostics (mirroring the M-105 "quoted forwards held verbatim"
-discipline). A full stripping calibration that re-prices each xccy swap to
-1e-9 against the dual OIS curves + FX forward curve is deferred to V3 —
-the seam is in place so the bootstrap entry point and contract stay stable.
+The basis is therefore *forward-implied*: the XCCY_BASIS quote **values are not
+strip inputs** — only their maturity grid and the ``quoted_on_foreign`` sign are
+(architecture §5.4). A non-zero basis is exactly the forward-vs-CIP deviation
+(§5.3): CIP-tight forwards strip to ``b ≈ 0``.
 
-Sign convention: :attr:`CrossCurrencyBasisQuote.quoted_on_foreign` carries
-the quote's understanding; the bootstrap requires every input quote to
-agree (mixed quotes ⇒ ERROR) and writes the resulting curve with the same
-flag. Adjacent pillars with opposing signs emit
-:data:`rates.fx.types.FX_BASIS_INVERTED` WARN.
+The strip is sequential (par→pillar): with ``b_1..b_{n-1}`` fixed, pillar ``n`` is
+solved by ``scipy.optimize.brentq`` over a ±10000 bps bracket (net PV is linear in
+``b_n`` with a non-zero slope, so the root is unique), then a reprice assert pins
+``|NPV(b_n*)| < 1e-9`` (D-13); failure emits
+:data:`rates.fx.types.FX_XCCY_REPRICE_FAIL` and the curve is not produced. The
+brentq path mirrors V1's closed-form-then-brentq structure and keeps the seam
+MtM-ready.
 
-Contract: C-104 (consumer-facing); produces C-105 output.
+Notional normalization: ``N_dom = 1`` (hence ``N_for = 1/S``); ``N`` cancels out of
+``b_n`` (it scales the base PV and the basis annuity identically). The day-count
+(Act/360, both legs — D-14) and roll (modified-following — D-14) are fixed here;
+only the joint calendars cross the seam (C-104').
+
+Sign convention: :attr:`CrossCurrencyBasisQuote.quoted_on_foreign` selects which
+leg carries the spread (foreign/USD leg by default, FX-O5). All input quotes must
+agree (mixed ⇒ ERROR); the stripped curve carries the same flag. Adjacent
+stripped pillars with opposing signs emit :data:`rates.fx.types.FX_BASIS_INVERTED`.
+
+Contract: C-104' (consumer-facing, gains the two calendars); produces C-105 output.
 """
 
 from __future__ import annotations
 
 import math
+from bisect import bisect_left
+from dataclasses import dataclass
 from datetime import date
 
+from scipy.optimize import brentq
+
+from rates.core.calendar import HolidayCalendar
 from rates.core.curve import OISCurve
 from rates.core.diagnostics import DiagnosticsCollector
+from rates.core.types import BusinessDayConvention, DayCount
 from rates.fx.basis_curve import BasisPillar, CrossCurrencyBasisCurve
 from rates.fx.conventions import FXConvention
 from rates.fx.forward_curve import FXForwardCurve
+from rates.fx.schedule import build_quarterly_xccy_schedule
 from rates.fx.types import (
     FX_BASIS_INVERTED,
+    FX_BOOTSTRAP_NON_CONVERGENT,
+    FX_XCCY_FORWARD_COVERAGE,
     FX_XCCY_QUOTE_SKIPPED,
+    FX_XCCY_REPRICE_FAIL,
     CrossCurrencyBasisQuote,
     FXMarketData,
 )
 
+# D-14: common day-count + roll for the quarterly xccy schedule (both legs).
+_STRIP_DAY_COUNT = DayCount.ACT_360
+_STRIP_BDC = BusinessDayConvention.MODIFIED_FOLLOWING
+
+_BPS_PER_UNIT = 10000.0
+_BRACKET_BPS = 10000.0  # D-13: ±10000 bps brentq bracket.
+_REPRICE_TOL_NPV = 1e-9  # D-13: matches FX_FORWARD_REPRICE_TOLERANCE.
+# Below this |spread| (bps) a stripped pillar is numerically zero: the brentq
+# solve leaves ~1e-11 bps noise on a true-zero basis, and opposing-sign noise
+# must not fire a spurious FX_BASIS_INVERTED.
+_SIGN_ZERO_EPS_BPS = 1e-6
+
 
 class XccyBootstrapError(RuntimeError):
-    """Raised when the xccy basis bootstrap cannot produce a curve."""
+    """Raised when the xccy basis strip cannot produce a curve."""
 
 
 class MixedQuotedLegError(ValueError):
     """Raised when xccy quotes disagree on ``quoted_on_foreign``."""
+
+
+class FXBootstrapNonConvergentError(RuntimeError):
+    """Raised when brentq cannot bracket/converge a pillar's basis."""
+
+
+@dataclass(frozen=True, slots=True)
+class _GridPillar:
+    """A tenor-grid anchor derived from a usable xccy quote (value not used)."""
+
+    tenor_code: str
+    tenor_days: int
+    maturity_date: date
+
+
+@dataclass(frozen=True, slots=True)
+class _CouponTerm:
+    """Pre-computed per-coupon quantities for one pillar's swap schedule."""
+
+    tau: float          # Act/360 accrual for this period
+    df_dom: float       # domestic OIS discount factor at the coupon date
+    fwd: float          # FX outright forward F(t_i) at the coupon date
+    bucket: int         # 1-based piecewise-flat basis bucket index
 
 
 def build_cross_basis_curve(
@@ -53,52 +109,288 @@ def build_cross_basis_curve(
     for_ois: OISCurve,
     fx_forward: FXForwardCurve,
     fx_convention: FXConvention,
+    dom_calendar: HolidayCalendar,
+    for_calendar: HolidayCalendar,
     diagnostics: DiagnosticsCollector,
 ) -> CrossCurrencyBasisCurve:
-    """Bootstrap a :class:`CrossCurrencyBasisCurve` for ``market.basis_quotes``.
+    """Strip a :class:`CrossCurrencyBasisCurve` for ``market.basis_quotes`` (C-104').
 
     Args:
         market:         FX snapshot. Must carry ≥1 xccy basis quote.
-        dom_ois:        Domestic-currency OIS curve.
-        for_ois:        Foreign-currency OIS curve.
-        fx_forward:     Already-bootstrapped FX forward curve for the pair.
+        dom_ois:        Domestic-currency OIS curve (projection + discount).
+        for_ois:        Foreign-currency OIS curve (projection + discount).
+        fx_forward:     Bootstrapped FX forward curve; must cover the longest
+                        xccy coupon date (no silent extrapolation, OQ-505).
         fx_convention:  Per-pair FX convention.
+        dom_calendar:   Domestic holiday calendar (joint roll, C-109).
+        for_calendar:   Foreign holiday calendar (joint roll, C-109).
         diagnostics:    Single mutable collector threaded by the orchestrator.
 
     Returns:
-        Frozen :class:`CrossCurrencyBasisCurve` with one pillar per usable
-        xccy quote (ascending by maturity_date). Sign convention is taken
-        from the input quotes; emit
-        :data:`rates.fx.types.FX_BASIS_INVERTED` WARN for adjacent pillars
-        with opposing signs.
+        Frozen :class:`CrossCurrencyBasisCurve` whose pillars carry the
+        **stripped** (forward-implied) term-structure spreads in bps, ascending
+        by ``maturity_date``. ``quoted_on_foreign`` is taken from the inputs.
 
     Raises:
-        XccyBootstrapError:  When no usable xccy quotes remain.
-        MixedQuotedLegError: When quotes disagree on ``quoted_on_foreign``.
+        XccyBootstrapError:           No usable quotes; FX forward coverage too
+                                      short (FX_XCCY_FORWARD_COVERAGE); or a
+                                      reprice residual ≥ 1e-9 (FX_XCCY_REPRICE_FAIL).
+        MixedQuotedLegError:          Quotes disagree on ``quoted_on_foreign``.
+        FXBootstrapNonConvergentError: brentq cannot bracket/converge a pillar.
     """
-    # The OIS curves and FX forward curve are accepted today so the contract
-    # surface is stable; V3 stripping calibration will consume them. Reference
-    # them to satisfy ruff's unused-arg lint (B007) without altering the seam.
-    _ = (dom_ois, for_ois, fx_forward, fx_convention)
-
     if not market.basis_quotes:
         msg = "FXMarketData carries no basis_quotes; cannot build basis curve"
-        diagnostics.error(
-            "FX_NO_BASIS_QUOTES",
-            msg,
-            {"pair_code": market.spot.pair.code},
-        )
+        diagnostics.error("FX_NO_BASIS_QUOTES", msg, {"pair_code": market.spot.pair.code})
         raise XccyBootstrapError(msg)
 
     quoted_on_foreign = _resolve_sign_convention(market.basis_quotes, diagnostics)
+    grid = _resolve_pillar_grid(market, diagnostics)
+    if not grid:
+        msg = "no usable xccy basis quotes after resolution"
+        diagnostics.error(
+            "FX_NO_BASIS_QUOTES",
+            msg,
+            {"pair_code": market.spot.pair.code, "skipped": len(market.basis_quotes)},
+        )
+        raise XccyBootstrapError(msg)
 
-    sorted_quotes = sorted(market.basis_quotes, key=lambda q: q.maturity_date)
+    _check_forward_coverage(grid, fx_forward, diagnostics)
+
+    spot_date = market.spot.spot_date
+    spot_rate = fx_forward.spot_rate
+    grid_maturities = [g.maturity_date for g in grid]
 
     pillars: list[BasisPillar] = []
+    solved_bps: list[float] = []
+    for n, g in enumerate(grid, start=1):
+        terms, pv_for0 = _coupon_terms(
+            spot_date,
+            g.maturity_date,
+            dom_ois,
+            for_ois,
+            fx_forward,
+            spot_rate,
+            dom_calendar,
+            for_calendar,
+            grid_maturities,
+        )
+        b_n_bps = _solve_pillar(
+            n=n,
+            terms=terms,
+            pv_for0=pv_for0,
+            spot_rate=spot_rate,
+            quoted_on_foreign=quoted_on_foreign,
+            solved_bps=solved_bps,
+            tenor_code=g.tenor_code,
+            diagnostics=diagnostics,
+        )
+        solved_bps.append(b_n_bps)
+        pillars.append(
+            BasisPillar(
+                tenor_code=g.tenor_code,
+                tenor_days=g.tenor_days,
+                maturity_date=g.maturity_date,
+                spread_bps=b_n_bps,
+            )
+        )
+
+    _warn_sign_inversions(pillars, diagnostics)
+
+    return CrossCurrencyBasisCurve(
+        pair_code=market.spot.pair.code,
+        spot_date=spot_date,
+        pillars_tuple=tuple(pillars),
+        quoted_on_foreign=quoted_on_foreign,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Strip mechanics (§5)
+# ---------------------------------------------------------------------------
+
+
+def _coupon_terms(
+    spot_date: date,
+    maturity: date,
+    dom_ois: OISCurve,
+    for_ois: OISCurve,
+    fx_forward: FXForwardCurve,
+    spot_rate: float,
+    dom_calendar: HolidayCalendar,
+    for_calendar: HolidayCalendar,
+    grid_maturities: list[date],
+) -> tuple[list[_CouponTerm], float]:
+    """Per-coupon terms + the spread-free foreign PV in domestic units (§5.2).
+
+    Domestic discounting is anchored at the spot date so ``DF_dom(t_0) = 1``
+    (§5.2): the strip discount factor is ``DF_dom(t_i)/DF_dom(spot)``. The
+    notional exchange at ``t_0`` therefore contributes exactly ``-S`` (it settles
+    at the discount anchor). The foreign OIS forward
+    ``f_for,i = (DF_for(t_{i-1})/DF_for(t_i) - 1)/tau_i`` is a discount-factor
+    ratio and so is anchor-invariant.
+
+    ``pv_for0`` is computed with ``N_dom = 1`` (``N_for = 1/S``):
+    ``PV_for0 = (1/S) · (-S + Σ F_i·f_for,i·tau_i·DF_dom_i + F_N·DF_dom_N)``. The
+    domestic leg prices to par by the single-curve identity, so it contributes
+    nothing here (§5.2).
+    """
+    schedule = build_quarterly_xccy_schedule(
+        spot_date, maturity, dom_calendar, for_calendar, _STRIP_BDC, _STRIP_DAY_COUNT
+    )
+    df_dom_spot = dom_ois.df_at(spot_date)
+
+    terms: list[_CouponTerm] = []
+    pv_acc_for = 0.0
+    for start, coupon, tau in zip(
+        schedule.period_starts, schedule.coupon_dates, schedule.taus, strict=True
+    ):
+        df_dom = dom_ois.df_at(coupon) / df_dom_spot
+        df_for = for_ois.df_at(coupon)
+        df_for_prev = for_ois.df_at(start)
+        fwd = fx_forward.forward_at(coupon)
+        f_for = (df_for_prev / df_for - 1.0) / tau
+        pv_acc_for += fwd * f_for * tau * df_dom
+        terms.append(
+            _CouponTerm(
+                tau=tau,
+                df_dom=df_dom,
+                fwd=fwd,
+                bucket=bisect_left(grid_maturities, coupon) + 1,
+            )
+        )
+
+    final_notional = terms[-1].fwd * terms[-1].df_dom
+    pv_for0 = (1.0 / spot_rate) * (-spot_rate + pv_acc_for + final_notional)
+    return terms, pv_for0
+
+
+def _net_pv(
+    *,
+    b_n_bps: float,
+    n: int,
+    terms: list[_CouponTerm],
+    pv_for0: float,
+    spot_rate: float,
+    quoted_on_foreign: bool,
+    solved_bps: list[float],
+) -> float:
+    """Net PV (domestic units) of the par swap to pillar ``n`` at trial ``b_n``.
+
+    Coupons in bucket ``n`` carry the trial ``b_n``; earlier buckets carry the
+    already-solved spreads. The spread enters the foreign leg (converted at the
+    forward) when ``quoted_on_foreign`` else the domestic leg (§5.2).
+    """
+    spread_sum = 0.0
+    for t in terms:
+        b_bps = b_n_bps if t.bucket == n else solved_bps[t.bucket - 1]
+        b_dec = b_bps / _BPS_PER_UNIT
+        weight = (t.fwd if quoted_on_foreign else 1.0) * t.tau * t.df_dom
+        spread_sum += b_dec * weight
+
+    if quoted_on_foreign:
+        # NPV = -(PV_for0 + N_for·Σ b·F·tau·DF_dom), N_for = 1/S.
+        return -(pv_for0 + spread_sum / spot_rate)
+    # NPV = N_dom·Σ b·tau·DF_dom - PV_for0, N_dom = 1.
+    return spread_sum - pv_for0
+
+
+def _solve_pillar(
+    *,
+    n: int,
+    terms: list[_CouponTerm],
+    pv_for0: float,
+    spot_rate: float,
+    quoted_on_foreign: bool,
+    solved_bps: list[float],
+    tenor_code: str,
+    diagnostics: DiagnosticsCollector,
+) -> float:
+    """brentq-solve pillar ``n`` over ±10000 bps; reprice-assert |NPV| < 1e-9."""
+
+    def npv(trial_bps: float) -> float:
+        return _net_pv(
+            b_n_bps=trial_bps,
+            n=n,
+            terms=terms,
+            pv_for0=pv_for0,
+            spot_rate=spot_rate,
+            quoted_on_foreign=quoted_on_foreign,
+            solved_bps=solved_bps,
+        )
+
+    try:
+        b_star = float(brentq(npv, -_BRACKET_BPS, _BRACKET_BPS, xtol=1e-12, rtol=1e-14))
+    except ValueError as e:
+        msg = (
+            f"{tenor_code}: brentq could not bracket the basis within "
+            f"±{_BRACKET_BPS:.0f} bps ({e})"
+        )
+        diagnostics.error(
+            FX_BOOTSTRAP_NON_CONVERGENT,
+            msg,
+            {"tenor_code": tenor_code, "bracket_bps": _BRACKET_BPS},
+        )
+        raise FXBootstrapNonConvergentError(msg) from e
+
+    residual = abs(npv(b_star))
+    if residual >= _REPRICE_TOL_NPV:
+        msg = (
+            f"{tenor_code}: xccy reprice residual {residual:.3e} ≥ {_REPRICE_TOL_NPV:.0e} "
+            f"after solving b={b_star:+.4f} bps"
+        )
+        diagnostics.error(
+            FX_XCCY_REPRICE_FAIL,
+            msg,
+            {"tenor_code": tenor_code, "residual": residual, "spread_bps": b_star},
+        )
+        raise XccyBootstrapError(msg)
+
+    return b_star
+
+
+def _check_forward_coverage(
+    grid: list[_GridPillar],
+    fx_forward: FXForwardCurve,
+    dg: DiagnosticsCollector,
+) -> None:
+    """OQ-505: abort if the FX forward curve cannot reach the longest coupon date."""
+    longest = grid[-1].maturity_date
+    last_settle = fx_forward.pillars_tuple[-1].settle_date
+    if longest > last_settle:
+        msg = (
+            f"FX forward curve last pillar {last_settle.isoformat()} precedes the longest "
+            f"xccy coupon date {longest.isoformat()}; refusing to extrapolate"
+        )
+        dg.error(
+            FX_XCCY_FORWARD_COVERAGE,
+            msg,
+            {
+                "longest_coupon": longest.isoformat(),
+                "last_forward_settle": last_settle.isoformat(),
+            },
+        )
+        raise XccyBootstrapError(msg)
+
+
+# ---------------------------------------------------------------------------
+# Quote-grid resolution (tenor + sign only — §5.4)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_pillar_grid(
+    market: FXMarketData, dg: DiagnosticsCollector
+) -> list[_GridPillar]:
+    """Build the ascending pillar maturity grid from usable quotes.
+
+    Non-finite quotes and maturity-collisions are skipped with
+    :data:`FX_XCCY_QUOTE_SKIPPED`. Only the maturity + tenor identity is kept;
+    the quote *value* is not a strip input (§5.4).
+    """
+    grid: list[_GridPillar] = []
     seen_dates: set[date] = set()
-    for q in sorted_quotes:
+    for q in sorted(market.basis_quotes, key=lambda q: q.maturity_date):
         if not math.isfinite(q.spread_bps):
-            diagnostics.warn(
+            dg.warn(
                 FX_XCCY_QUOTE_SKIPPED,
                 f"{q.tenor_code}: spread_bps is not finite; skipped",
                 {
@@ -109,56 +401,24 @@ def build_cross_basis_curve(
             )
             continue
         if q.maturity_date in seen_dates:
-            # Maturity collision: keep the first quote, drop later duplicates
-            # so the CrossCurrencyBasisCurve strictly-ascending invariant holds.
-            diagnostics.warn(
+            dg.warn(
                 FX_XCCY_QUOTE_SKIPPED,
                 (
                     f"{q.tenor_code}: maturity {q.maturity_date.isoformat()} "
                     "already covered by an earlier quote; duplicate dropped"
                 ),
-                {
-                    "tenor_code": q.tenor_code,
-                    "maturity_date": q.maturity_date.isoformat(),
-                },
+                {"tenor_code": q.tenor_code, "maturity_date": q.maturity_date.isoformat()},
             )
             continue
-        tenor_days = (q.maturity_date - market.spot.spot_date).days
-        pillars.append(
-            BasisPillar(
+        grid.append(
+            _GridPillar(
                 tenor_code=q.tenor_code,
-                tenor_days=tenor_days,
+                tenor_days=(q.maturity_date - market.spot.spot_date).days,
                 maturity_date=q.maturity_date,
-                spread_bps=q.spread_bps,
             )
         )
         seen_dates.add(q.maturity_date)
-
-    if not pillars:
-        msg = "no usable xccy basis quotes after resolution"
-        diagnostics.error(
-            "FX_NO_BASIS_QUOTES",
-            msg,
-            {
-                "pair_code": market.spot.pair.code,
-                "skipped": len(market.basis_quotes),
-            },
-        )
-        raise XccyBootstrapError(msg)
-
-    _warn_sign_inversions(pillars, diagnostics)
-
-    return CrossCurrencyBasisCurve(
-        pair_code=market.spot.pair.code,
-        spot_date=market.spot.spot_date,
-        pillars_tuple=tuple(pillars),
-        quoted_on_foreign=quoted_on_foreign,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
+    return grid
 
 
 def _resolve_sign_convention(
@@ -184,15 +444,18 @@ def _resolve_sign_convention(
     return first
 
 
-def _warn_sign_inversions(
-    pillars: list[BasisPillar], dg: DiagnosticsCollector
-) -> None:
-    """Emit ``FX_BASIS_INVERTED`` for each adjacent pillar pair whose spreads
-    have opposing strict signs (zero spreads are treated as same-sign as the
-    neighbour to avoid noisy WARNs around the zero-crossing edge case)."""
+def _warn_sign_inversions(pillars: list[BasisPillar], dg: DiagnosticsCollector) -> None:
+    """Emit ``FX_BASIS_INVERTED`` for adjacent stripped pillars of opposing sign.
+
+    Numerically-zero spreads (``|b| < _SIGN_ZERO_EPS_BPS``) are treated as
+    same-sign as the neighbour to avoid noisy WARNs around the zero-crossing
+    edge case (and the brentq noise on a true-zero basis).
+    """
     for i in range(1, len(pillars)):
         left = pillars[i - 1].spread_bps
         right = pillars[i].spread_bps
+        if abs(left) < _SIGN_ZERO_EPS_BPS or abs(right) < _SIGN_ZERO_EPS_BPS:
+            continue
         if left * right < 0.0:
             dg.warn(
                 FX_BASIS_INVERTED,
@@ -210,6 +473,7 @@ def _warn_sign_inversions(
 
 
 __all__ = [
+    "FXBootstrapNonConvergentError",
     "MixedQuotedLegError",
     "XccyBootstrapError",
     "build_cross_basis_curve",

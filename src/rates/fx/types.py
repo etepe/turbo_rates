@@ -27,6 +27,8 @@ FX_PARITY_MISMATCH: str = "FX_PARITY_MISMATCH"
 FX_BASIS_INVERTED: str = "FX_BASIS_INVERTED"
 FX_XCCY_QUOTE_SKIPPED: str = "FX_XCCY_QUOTE_SKIPPED"
 FX_BOOTSTRAP_NON_CONVERGENT: str = "FX_BOOTSTRAP_NON_CONVERGENT"
+FX_XCCY_REPRICE_FAIL: str = "FX_XCCY_REPRICE_FAIL"
+FX_XCCY_FORWARD_COVERAGE: str = "FX_XCCY_FORWARD_COVERAGE"
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +230,9 @@ __all__ = [
     "FX_FWD_POINTS_NON_MONOTONE",
     "FX_PARITY_MISMATCH",
     "FX_SPOT_MISSING",
+    "FX_XCCY_FORWARD_COVERAGE",
     "FX_XCCY_QUOTE_SKIPPED",
+    "FX_XCCY_REPRICE_FAIL",
     "CrossCurrencyBasisQuote",
     "CurrencyPair",
     "FXForwardPointQuote",

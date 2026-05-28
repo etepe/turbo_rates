@@ -75,7 +75,11 @@ from rates.core.scenario import (
 )
 from rates.core.types import DayCount
 from rates.fx.basis_curve import BasisPillar, CrossCurrencyBasisCurve
-from rates.fx.bootstrap_basis import build_cross_basis_curve
+from rates.fx.bootstrap_basis import (
+    FXBootstrapNonConvergentError,
+    XccyBootstrapError,
+    build_cross_basis_curve,
+)
 from rates.fx.bootstrap_forward import build_fx_forward_curve
 from rates.fx.conventions import FXConvention, FXConventions
 from rates.fx.forward_curve import FXForwardCurve, FXForwardPillar
@@ -721,9 +725,12 @@ def _run_fx_pipeline(
     if fx_market.basis_quotes:
         try:
             basis = build_cross_basis_curve(
-                fx_market, dom_curve, for_curve, fx_forward, fx_conv, dg
+                fx_market, dom_curve, for_curve, fx_forward, fx_conv, dom_cal, for_cal, dg
             )
-        except ValueError as e:
+        except (ValueError, XccyBootstrapError, FXBootstrapNonConvergentError) as e:
+            # The strip emits its own specific ERROR (e.g. FX_XCCY_FORWARD_COVERAGE,
+            # FX_XCCY_REPRICE_FAIL); add build-fail context and abort cleanly (exit 2)
+            # rather than letting the RuntimeError escape the orchestrator.
             dg.error(
                 "FX_BASIS_BUILD_FAIL",
                 f"cross-currency basis curve construction failed: {e}",
