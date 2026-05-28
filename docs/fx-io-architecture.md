@@ -2,7 +2,7 @@
 
 **Based on:** `docs/architecture.md` (V1 OIS), `docs/fx-architecture.md` (V2 FX math layer), `CHANGELOG.md` v0.2.0 "Not in this release" section.
 **Date:** 2026-05-28
-**Status:** Draft — Pending Validation
+**Status:** Post-Grill Review — Awaiting Final Human Validation (PR #15) — 2026-05-28 (grill rounds 1–4 applied; 8/8 focus areas resolved)
 **Ticket:** MON-013
 **Scope:** wire the v0.2.0 FX math layer (M-101..M-107) into IO, CLI, and pipeline orchestration so it is consumable end-to-end. No changes to FX math; no V3 xccy stripping.
 
@@ -63,7 +63,8 @@ Rejected: Typer / Click (extra dep, no value over argparse for a 3-verb CLI subg
       "features_served": ["F-FX-IO-CSV"],
       "complexity": "medium",
       "suggested_agent": "sonnet",
-      "new_file": "src/rates/io/fx_market.py"
+      "new_file": "src/rates/io/fx_market.py",
+      "implementation_note": "Pydantic v2 discriminated union (FXSpotRow | FXForwardPointRow | FXBasisRow) via TypeAdapter for row-type routing; file-level validators run after Pydantic row validation to enforce exactly-one-SPOT, dedupe (instrument_type, tenor_code) keep-first, and pair-not-found ordering."
     },
     {
       "module_id": "M-109",
@@ -144,12 +145,16 @@ Rejected: Typer / Click (extra dep, no value over argparse for a 3-verb CLI subg
           "FileNotFoundError"
         ],
         "diagnostic_codes_emitted": [
-          "FX_IO_SCHEMA_MISSING_COL (ERROR)",
-          "FX_IO_EMPTY_SNAPSHOT (ERROR)",
-          "FX_IO_ROW_PARSE_FAIL (ERROR)",
+          "FX_IO_SCHEMA_MISSING_COL (ERROR, required column absent)",
+          "FX_IO_EMPTY_SNAPSHOT (ERROR, zero data rows in file)",
+          "FX_IO_ROW_PARSE_FAIL (ERROR, Pydantic discriminated-union row validation failed)",
           "FX_IO_UNKNOWN_INSTRUMENT (ERROR, instrument_type not in {SPOT, FORWARD_POINT, XCCY_BASIS})",
-          "FX_IO_PAIR_MISMATCH (WARN, row pair != requested pair; row skipped)",
-          "FX_IO_NO_SPOT (ERROR, zero SPOT rows after filtering)"
+          "FX_IO_PAIR_MISMATCH (WARN, row pair != requested pair; row skipped — allows multi-pair master CSV in dev/test)",
+          "FX_IO_PAIR_NOT_FOUND (ERROR, zero rows remain after pair filter — checked BEFORE NO_SPOT so a typo in --pair gets the specific error)",
+          "FX_IO_NO_SPOT (ERROR, requested pair present but zero SPOT rows)",
+          "FX_IO_MULTIPLE_SPOT (ERROR, more than one SPOT row for the requested pair — no silent first-wins)",
+          "FX_IO_DUPLICATE_TENOR (WARN, duplicate (instrument_type, tenor_code) for the requested pair; keep-first, mirrors M-106 XCCY policy)",
+          "FX_SNAPSHOT_DATE_MISMATCH (ERROR, as_of dates of the FX / TRY OIS / foreign OIS snapshots differ — emitted by the orchestrator, run aborts)"
         ]
       }
     },
@@ -188,10 +193,21 @@ Rejected: Typer / Click (extra dep, no value over argparse for a 3-verb CLI subg
         "signatures": [
           "run_fx_bootstrap(args: argparse.Namespace) -> int",
           "run_fx_diagnose(args: argparse.Namespace) -> int",
-          "run_fx_price(args: argparse.Namespace) -> int"
+          "run_fx_price_outright(args: argparse.Namespace) -> int",
+          "run_fx_price_swap(args: argparse.Namespace) -> int",
+          "run_fx_price_xccy(args: argparse.Namespace) -> int"
         ],
-        "input": "argparse.Namespace with: pair (str), as_of (date|None), fx_snapshot (Path|None), foreign_snapshot (Path|None), domestic_snapshot (Path|None), conventions_yaml (Path), output_root (Path), quiet (bool), convention_override (list[str]|None). run_fx_price adds: tenor_code (str) or value_date (date), instrument (outright|swap|xccy).",
+        "input_shared": "Namespace fields common to all entry points: pair (str), as_of (date|None), fx_snapshot (Path|None), foreign_snapshot (Path|None), domestic_snapshot (Path|None), conventions_yaml (Path), output_root (Path), quiet (bool), convention_override (list[str]|None).",
+        "input_price_outright": "Adds — mutually exclusive, exactly one required: tenor_code (str) | value_date (date). Enforced by argparse add_mutually_exclusive_group(required=True).",
+        "input_price_swap": "Adds — each leg's tenor vs value-date is mutex-required: (near_tenor | near_value_date) AND (far_tenor | far_value_date).",
+        "input_price_xccy": "Adds: tenor_code (str). XCCY basis swaps are tenor-keyed; value-date variant deferred to a later release.",
+        "tenor_resolution_rule": "When --tenor is given, the orchestrator resolves to value_date first (spot_date + tenor → roll per joint calendar), then takes the same value-date code path. This guarantees `--tenor 3M` and `--value-date <resolved date>` produce identical answers — single pricing code path.",
         "output": "Unix exit code — 0 on WARN-only, 2 on any ERROR. Mirrors run_bootstrap exit semantics.",
+        "additional_diagnostic_codes": [
+          "FX_PRICE_INVALID_VALUE_DATE (ERROR, value-date is not a good business day on the joint calendar; no auto-roll — explicit input required)",
+          "FX_PRICE_VALUE_DATE_BEFORE_SPOT (ERROR, value-date earlier than spot_date = as_of + spot_lag)",
+          "FX_PRICE_EXTRAPOLATION (WARN, value-date beyond the last curve pillar; price still returned, trader's responsibility)"
+        ],
         "error_cases": [
           "All caught internally; converted to diagnostics + exit 2. No exceptions escape to argparse."
         ]
@@ -207,7 +223,8 @@ Rejected: Typer / Click (extra dep, no value over argparse for a 3-verb CLI subg
         "input": "Existing signature unchanged — `MarketData`, `Conventions`, `HolidayCalendar`, `DayCount`, `DiagnosticsCollector`, currency selector.",
         "output": "OISCurve (one for TRY domestic, one for foreign).",
         "error_cases": [
-          "ZeroValidQuotesError (per currency) — caught by orchestrator; emits FX_OIS_BOOTSTRAP_FAIL ERROR scoped to the currency that failed and decides whether the FX run can continue (see OQ-303)."
+          "ZeroValidQuotesError (domestic TRY) — caught by orchestrator; emits FX_DOMESTIC_OIS_BOOTSTRAP_FAIL ERROR; aborts the FX run (no partial output).",
+          "ZeroValidQuotesError (foreign USD/EUR) — caught by orchestrator; emits FX_FOREIGN_OIS_BOOTSTRAP_FAIL ERROR; also aborts (the parity check is the reason the dual-curve architecture exists). --no-parity-check opt-out path is deferred to v0.4."
         ]
       }
     }
@@ -270,6 +287,16 @@ USDTRY,XCCY_BASIS,1Y,365,-185.0,-175.0,-180.0,BLOOMBERG
 - Rows with `instrument_type` outside this set emit `FX_IO_UNKNOWN_INSTRUMENT` ERROR.
 - Rows where `pair` ≠ requested pair are skipped with `FX_IO_PAIR_MISMATCH` WARN (allows a multi-pair master CSV in dev/test).
 
+**File-level (cross-row) invariants** — run by M-108 after Pydantic row validation:
+
+- Zero rows after pair filtering ⇒ `FX_IO_PAIR_NOT_FOUND` ERROR. Checked BEFORE the SPOT-count check so a typo in `--pair` gets the specific error message.
+- Exactly one `SPOT` row required per pair: zero ⇒ `FX_IO_NO_SPOT` ERROR; two or more ⇒ `FX_IO_MULTIPLE_SPOT` ERROR (no silent first-wins — vendor feeds can ship duplicates from multiple sources, picking one silently produces wrong parity checks).
+- Duplicate `(instrument_type, tenor_code)` for the requested pair ⇒ `FX_IO_DUPLICATE_TENOR` WARN; keep first (mirrors M-106 XCCY dedup behavior).
+
+**Cross-CSV invariant** — checked by M-111 orchestrator before any bootstrap call:
+
+- The FX snapshot, the TRY OIS snapshot, and the foreign OIS snapshot must all have the same as_of date. Any mismatch ⇒ `FX_SNAPSHOT_DATE_MISMATCH` ERROR + run abort. The joint calendar already prevents legitimate stale-foreign scenarios: if either market is closed, no FX swap settles on that date, so a "today TRY + yesterday USD" combination has no operational meaning. (Auto-derivation from `--as-of` produces matching paths by construction; mismatch can only happen when `--foreign-snapshot` / `--domestic-snapshot` are explicitly overridden.)
+
 **Per-row resolution** of bid/ask/mid follows the V1 OIS rule: `mid → avg(bid,ask) → ask → bid → skip-with-WARN`.
 
 ---
@@ -307,27 +334,35 @@ sequenceDiagram
     CLI-->>U: stdout pretty-printed diagnostics + exit code
 ```
 
-### 6.2 `rates fx price` (ad-hoc pricing from persisted curves)
+### 6.2 `rates fx price-outright` (ad-hoc pricing from persisted curves)
+
+Three CLI verbs (`price-outright | price-swap | price-xccy`), each backed by its own `rates.app` entry point. The `price-swap` and `price-xccy` sequences follow the same shape — load persisted curves, validate value-date(s), call the matching `rates.fx.pricer` function. Three verbs (instead of one verb with an `--instrument` flag) so argparse cleanly enforces per-mode required args and produces specific error messages.
 
 ```mermaid
 sequenceDiagram
     participant U as User
     participant CLI as rates.cli (M-112)
-    participant APP as rates.app.run_fx_price (M-111)
+    participant APP as rates.app.run_fx_price_outright (M-111)
+    participant CONV as Conventions (M-102)
     participant PERS as persistence (M-110)
     participant PRC as pricer (M-107)
 
-    U->>CLI: rates fx price --pair USDTRY --tenor 3M --instrument outright
-    CLI->>APP: run_fx_price(args)
-    APP->>PERS: read latest <pair>_fx_summary.json + curves
-    APP->>APP: reconstruct FXForwardCurve / CrossCurrencyBasisCurve
-    APP->>PRC: price_outright_forward(curve, tenor) → quote
+    U->>CLI: rates fx price-outright --pair USDTRY --tenor 3M
+    CLI->>APP: run_fx_price_outright(args)
+    APP->>CONV: load fx_conventions[USDTRY] (joint calendar, spot lag)
+    APP->>APP: resolve --tenor 3M → value_date via spot_date + roll
+    APP->>APP: validate value_date is good BD AND > spot_date
+    APP->>PERS: read latest <pair>_fx_summary.json + curve partition
+    APP->>APP: reconstruct FXForwardCurve
+    APP->>PRC: price_outright_forward(curve, value_date) → quote
     APP-->>CLI: stdout (quote) + exit 0
 ```
 
-### 6.3 `rates fx diagnose` (no outputs written)
+Note: when `--value-date X` is given directly, the orchestrator skips the tenor-resolution step but runs the same validation and pricing path. Same resolved date → same number, by construction (single pricing code path; see C-103 `tenor_resolution_rule`).
 
-Identical to 6.1 through the `FXMarketData` load + parity check, but **does not** call `bootstrap_curve` for foreign OIS, **does not** persist anything. Purpose: validate the FX snapshot CSV alone (schema, instrument coverage, spot presence, sign conventions on basis). Equivalent to V1 `rates diagnose`.
+### 6.3 `rates fx diagnose` (full pipeline through parity check; no outputs written)
+
+Runs the **entire orchestration up through the parity check**: loads FX + dual OIS snapshots, bootstraps both OIS curves, builds the FX forward curve with parity diagnostics, builds the basis curve. **Does not persist** (no summary JSON, no Parquet partitions) and **does not run pricing**. Purpose: end-to-end validation of the data + orchestration pipeline (CSV schema, all cross-row + cross-CSV invariants, dual-OIS bootstrap success, parity WARN counts) without committing artifacts to disk. Equivalent to V1 `rates diagnose`. This is the **Phase 3a deliverable** — see §7 build order.
 
 ---
 
@@ -353,19 +388,29 @@ Identical to 6.1 through the `FXMarketData` load + parity check, but **does not*
       "estimated_effort": "small"
     },
     {
-      "phase": 3,
-      "name": "Orchestration",
-      "modules": ["M-111"],
-      "rationale": "Ties M-108, M-110, and existing OIS bootstrap together. Highest complexity; opus-assigned.",
-      "deliverable": "rates.app.run_fx_bootstrap end-to-end on a fixture FX snapshot pair (USDTRY) produces both summary JSON and Parquet partitions with parity check WARN counts inside tolerance.",
-      "estimated_effort": "large"
+      "phase": "3a",
+      "name": "Orchestration — diagnose path (no persistence, no pricing)",
+      "modules": ["M-111 (partial: run_fx_diagnose only)"],
+      "rationale": "Earliest end-to-end smoke. Loads FX + dual OIS snapshots, bootstraps both OIS curves, builds FX forward curve + parity check, builds basis curve, prints diagnostics. No persistence, no pricing. De-risks the dual-OIS orchestration design AND locks the snapshot-date check + abort-on-foreign-fail policy before committing to output formats. This is where the hardest architectural work lives — opus-implementation, sonnet-review after delivery.",
+      "deliverable": "rates.app.run_fx_diagnose returns exit 0 on a curated USDTRY fixture; zero FX_PARITY_MISMATCH warnings; FX_SNAPSHOT_DATE_MISMATCH path covered in tests. Phase 4 can implement the `rates fx diagnose` CLI verb against this surface immediately.",
+      "estimated_effort": "medium",
+      "suggested_agent": "opus (implementation) → sonnet (review)"
+    },
+    {
+      "phase": "3b",
+      "name": "Orchestration — bootstrap + three pricing entry points",
+      "modules": ["M-111 (complete: run_fx_bootstrap, run_fx_price_outright, run_fx_price_swap, run_fx_price_xccy)"],
+      "rationale": "Adds persistence call sites (M-110) and the three pricing entry points. Pricing path locks the --tenor / --value-date mutex enforcement and the validation diagnostics from C-103. M-111 stays one source file; phased delivery within the module.",
+      "deliverable": "rates.app.run_fx_bootstrap end-to-end on the curated USDTRY fixture produces both summary JSON and Parquet partitions with zero FX_PARITY_MISMATCH. All three price entry points return quotes on the persisted curves; mutex + value-date validation diagnostics covered.",
+      "estimated_effort": "large",
+      "suggested_agent": "opus"
     },
     {
       "phase": 4,
       "name": "CLI wiring",
       "modules": ["M-112"],
-      "rationale": "Thin shell on top of M-111. Built last so we can iterate on M-111 API without churning argparse code.",
-      "deliverable": "`rates fx bootstrap` / `rates fx diagnose` / `rates fx price` end-to-end CLI tests pass. V1 `rates bootstrap` regression test still green.",
+      "rationale": "Thin shell on top of M-111. `rates fx diagnose` verb can land right after 3a; bootstrap + three price verbs after 3b. C-103 signatures locked in this doc — M-112 can be drafted in parallel with 3b.",
+      "deliverable": "`rates fx diagnose` / `rates fx bootstrap` / `rates fx price-outright` / `rates fx price-swap` / `rates fx price-xccy` end-to-end CLI tests pass. V1 `rates bootstrap` regression test still green.",
       "estimated_effort": "small"
     },
     {
@@ -401,6 +446,11 @@ Identical to 6.1 through the `FXMarketData` load + parity check, but **does not*
 | D6 | xccy stripping | Keep M-106 verbatim (no calibration) | Light calibration pass in v0.3.0 | Out of scope per CHANGELOG; M-106 already returns curves consumable by M-107. Full calibration is the V3 work item. |
 | D7 | Diagnostic code namespace | `FX_*` codes are pair-agnostic; `pair` carried as a structured `Diagnostic.context` field | Per-pair codes (`FX_USDTRY_PARITY_MISMATCH`) | Pair-agnostic codes keep the grep-able code surface small; structured context preserves the pair for downstream filtering. Mirrors V1 (no per-currency code suffix). |
 | D8 | Tests marker | New `phase8` pytest marker for v0.3.0 IO/CLI/app tests | Reuse `phase7` (FX) | Same boundary discipline V1 used between hardening (`phase5`) and properties (`phase6`); makes selective re-runs easy. |
+| D9 | Foreign-OIS failure isolation | Abort on foreign-OIS bootstrap failure (same as domestic) | WARN + skip parity & continue | Continuing without the parity check produces output indistinguishable from a working run; downstream consumers (pricer, V0.4 reporting) would silently use a half-built curve. `--no-parity-check` opt-out deferred to v0.4 if ops genuinely needs it. *(Grill round 1, Q2.)* |
+| D10 | `run_fx_price` surface | Three CLI verbs (`price-outright`, `price-swap`, `price-xccy`) + matching app entry points | Single verb + `--instrument` mode flag | Per-verb argparse enforces conditional required args cleanly; better error UX; each verb body stays ≤30 LoC. *(Grill round 3, Q6.)* |
+| D11 | Tenor vs. value-date pricing | Mutually exclusive required group; tenor path internally resolves to value-date first → single pricing code path | Two parallel code paths | Guarantees `--tenor 3M` and `--value-date <resolved date>` produce identical numbers; eliminates a class of "two ways to price the same forward give different answers" bugs. Value-date validation against joint calendar prevents silent interpolation to non-settlement dates. *(Grill round 3, Q5.)* |
+| D12 | Snapshot date alignment | Hard fail (`FX_SNAPSHOT_DATE_MISMATCH` ERROR + abort) when FX / TRY-OIS / foreign-OIS as_of dates differ | WARN + proceed; or `--allow-stale-foreign-bd N` flag | Joint calendar semantics already require both markets open for any FX swap to settle; mixed-date runs have no operational meaning. KISS — no opt-out flag in v0.3.0. *(Grill round 1, Q1.)* |
+| D13 | Acceptance gate threshold | Curated fixture + zero `FX_PARITY_MISMATCH` warnings (≤1 bp by construction) | Real-world fixture + 5 bps tolerance | The smoke test verifies bootstrap math correctness against M-105's WARN threshold; market-noise validation is a separate, deferred gate. Tolerance numbers in two places (M-105 WARN at 1 bp, gate at 5 bps) had no rationale. *(Grill round 4, Q7.)* |
 
 ---
 
@@ -408,9 +458,9 @@ Identical to 6.1 through the `FXMarketData` load + parity check, but **does not*
 
 | ID | Question | Provisional Resolution | Risk if Wrong |
 |----|----------|------------------------|---------------|
-| OQ-301 | Foreign-OIS snapshot discovery: explicit `--foreign-snapshot` flag, or auto-derived from `--pair USDTRY` → `data/snapshots/usd_ois_<as_of>.csv`? | Auto-derive with `--foreign-snapshot PATH` as explicit override. Same auto-derivation logic for `--domestic-snapshot`. | Low — single CLI surface change; can revisit before v0.3.0 cut. |
+| OQ-301 | Foreign-OIS snapshot discovery: explicit `--foreign-snapshot` flag, or auto-derived from `--pair USDTRY` → `data/snapshots/usd_ois_<as_of>.csv`? | **Resolved (grill 2026-05-28): auto-derive with explicit `--foreign-snapshot PATH` / `--domestic-snapshot PATH` overrides.** When override is used, M-111 enforces all three CSV as_of dates match exactly (`FX_SNAPSHOT_DATE_MISMATCH` ERROR otherwise). No `--allow-stale-foreign-bd` flag in v0.3.0 — the joint calendar already covers the legitimate case (if either market is closed, no FX swap settles on that date). | Resolved. |
 | OQ-302 | Should `FXSummary` JSON include pre-computed pricing snapshots (1M/3M/6M outright forwards) or stay strictly curve-only? | Curve-only in v0.3.0. Pricing is the dedicated `rates fx price` verb. Reporting layer (v0.4) can read curves and render. | Low — additive. |
-| OQ-303 | Failure isolation: if foreign-OIS `bootstrap_curve` fails, can the FX run continue? | TRY (domestic) bootstrap failure ⇒ abort with `FX_OIS_BOOTSTRAP_FAIL` ERROR (no FX forward parity possible, no usable persistence). Foreign-OIS failure ⇒ skip parity check inside M-105 (emit `FX_PARITY_CHECK_SKIPPED` WARN), proceed with naked covered-interest forwards from quotes; basis curve still builds. | Medium — affects exit-code semantics and CHANGELOG promise. Validate during M-111 implementation. |
+| OQ-303 | Failure isolation: if foreign-OIS `bootstrap_curve` fails, can the FX run continue? | **Resolved (grill 2026-05-28): abort.** Both TRY (domestic) and foreign-OIS bootstrap failures ⇒ ERROR (`FX_DOMESTIC_OIS_BOOTSTRAP_FAIL` / `FX_FOREIGN_OIS_BOOTSTRAP_FAIL`) + exit 2 + no partial output. Continuing without the parity check produces output indistinguishable from a working run — downstream consumers (pricer, V0.4 reporting layer) would silently use a half-built curve. `--no-parity-check` opt-out path deferred to v0.4 (would write to a separate partition path so consumers can distinguish curve provenance). | Resolved. |
 | OQ-304 | Currency-pair scoping of `FX_*` diagnostic codes. | Codes are pair-agnostic; pair lives on `Diagnostic.context["pair"]`. CLI pretty-printer formats `[FX_PARITY_MISMATCH USDTRY 3M] ...`. | Low — structured context already exists in V1 diagnostics. |
 | OQ-305 | Should `Diagnostics.context` schema be formalized in Pydantic for FX rows (vs. the V1 free-form `dict[str, Any]`)? | Keep V1 free-form for v0.3.0 to avoid disturbing the diagnostics module. Revisit in v0.4 if reporting layer needs a typed view. | Low. |
 
@@ -426,7 +476,7 @@ The release is cuttable when ALL hold:
 - `ruff check src tests scripts` clean.
 - `pytest -q` — green; the 1 previously-skipped test (`rates.io.fx_market`) is now active and passing. New `phase8` marker has ≥ 20 tests covering IO schema validation, CLI argparse coverage, app pipeline orchestration on fixture data, persistence round-trip.
 - V1 OIS regression: `rates bootstrap` / `rates diagnose` / `rates forward` smoke unchanged. `scripts/smoke_test.py` exit 0, reprice within `1e-10` (same as v0.2.0).
-- New `scripts/fx_smoke_test.py` or extension to existing script: `rates fx bootstrap --pair USDTRY` on a fixture snapshot exits 0, summary JSON loads back into Pydantic without errors, parity-check diagnostics within 5 bps tolerance.
+- New `scripts/fx_smoke_test.py` or extension to existing script: `rates fx bootstrap --pair USDTRY` on a **curated** fixture snapshot (under `fixtures/fx_smoke_usdtry/`, hand-crafted so pillar-by-pillar parity diffs stay < 1 bp of spot — the same threshold M-105 already uses) exits 0, summary JSON loads back into Pydantic without errors, **zero `FX_PARITY_MISMATCH` warnings emitted**. Market-noise integration smoke against real-world snapshots is a separate, deferred gate.
 - `docs/fx-io-architecture.md` (this file) merged to develop before any implementation PR opens.
 - `CHANGELOG.md` 0.3.0 section drafted and referenced in the release PR.
 
