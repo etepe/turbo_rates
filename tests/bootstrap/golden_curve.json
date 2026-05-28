@@ -1,0 +1,161 @@
+{
+  "valuation_date": "2026-06-12",
+  "day_count": "Act/360",
+  "pillars": [
+    {
+      "tenor_code": "TYSO1D",
+      "tenor_days": 3,
+      "end_date": "2026-06-15",
+      "rate": 0.478,
+      "discount_factor_repr": "0.9960324706585436"
+    },
+    {
+      "tenor_code": "TYSO1W",
+      "tenor_days": 7,
+      "end_date": "2026-06-19",
+      "rate": 0.4775,
+      "discount_factor_repr": "0.9908006908082593"
+    },
+    {
+      "tenor_code": "TYSO2W",
+      "tenor_days": 14,
+      "end_date": "2026-06-26",
+      "rate": 0.477,
+      "discount_factor_repr": "0.9817878356487163"
+    },
+    {
+      "tenor_code": "TYSO1M",
+      "tenor_days": 31,
+      "end_date": "2026-07-13",
+      "rate": 0.475,
+      "discount_factor_repr": "0.9607045166455401"
+    },
+    {
+      "tenor_code": "TYSO2M",
+      "tenor_days": 61,
+      "end_date": "2026-08-12",
+      "rate": 0.47,
+      "discount_factor_repr": "0.9262356240512518"
+    },
+    {
+      "tenor_code": "TYSO3M",
+      "tenor_days": 94,
+      "end_date": "2026-09-14",
+      "rate": 0.465,
+      "discount_factor_repr": "0.8917292115627554"
+    },
+    {
+      "tenor_code": "TYSO4M",
+      "tenor_days": 122,
+      "end_date": "2026-10-12",
+      "rate": 0.458,
+      "discount_factor_repr": "0.8656426434802681"
+    },
+    {
+      "tenor_code": "TYSO5M",
+      "tenor_days": 153,
+      "end_date": "2026-11-12",
+      "rate": 0.452,
+      "discount_factor_repr": "0.8388558006878618"
+    },
+    {
+      "tenor_code": "TYSO6M",
+      "tenor_days": 185,
+      "end_date": "2026-12-14",
+      "rate": 0.445,
+      "discount_factor_repr": "0.8138811959532019"
+    },
+    {
+      "tenor_code": "TYSO9M",
+      "tenor_days": 273,
+      "end_date": "2027-03-12",
+      "rate": 0.43,
+      "discount_factor_repr": "0.7541004210394018"
+    },
+    {
+      "tenor_code": "TYSO1Y",
+      "tenor_days": 367,
+      "end_date": "2027-06-14",
+      "rate": 0.42,
+      "discount_factor_repr": "0.7001983895437041"
+    },
+    {
+      "tenor_code": "TYSO18M",
+      "tenor_days": 549,
+      "end_date": "2027-12-13",
+      "rate": 0.4,
+      "discount_factor_repr": "0.594295000958836"
+    },
+    {
+      "tenor_code": "TYSO2Y",
+      "tenor_days": 731,
+      "end_date": "2028-06-12",
+      "rate": 0.385,
+      "discount_factor_repr": "0.5219847813600639"
+    },
+    {
+      "tenor_code": "TYSO3Y",
+      "tenor_days": 1096,
+      "end_date": "2029-06-12",
+      "rate": 0.365,
+      "discount_factor_repr": "0.39911607618667966"
+    },
+    {
+      "tenor_code": "TYSO4Y",
+      "tenor_days": 1461,
+      "end_date": "2030-06-12",
+      "rate": 0.355,
+      "discount_factor_repr": "0.3055881403238769"
+    },
+    {
+      "tenor_code": "TYSO5Y",
+      "tenor_days": 1826,
+      "end_date": "2031-06-12",
+      "rate": 0.345,
+      "discount_factor_repr": "0.2408883132183676"
+    },
+    {
+      "tenor_code": "TYSO6Y",
+      "tenor_days": 2194,
+      "end_date": "2032-06-14",
+      "rate": 0.34,
+      "discount_factor_repr": "0.18692359719709675"
+    },
+    {
+      "tenor_code": "TYSO7Y",
+      "tenor_days": 2558,
+      "end_date": "2033-06-13",
+      "rate": 0.337,
+      "discount_factor_repr": "0.14476867799490842"
+    },
+    {
+      "tenor_code": "TYSO8Y",
+      "tenor_days": 2922,
+      "end_date": "2034-06-12",
+      "rate": 0.3345,
+      "discount_factor_repr": "0.11292126885570218"
+    },
+    {
+      "tenor_code": "TYSO9Y",
+      "tenor_days": 3287,
+      "end_date": "2035-06-12",
+      "rate": 0.333,
+      "discount_factor_repr": "0.08739310373647119"
+    },
+    {
+      "tenor_code": "TYSO10Y",
+      "tenor_days": 3653,
+      "end_date": "2036-06-12",
+      "rate": 0.3325,
+      "discount_factor_repr": "0.06633828121557615"
+    },
+    {
+      "tenor_code": "TYSO15Y",
+      "tenor_days": 5479,
+      "end_date": "2041-06-12",
+      "rate": 0.33,
+      "discount_factor_repr": "0.018428821558191835"
+    }
+  ],
+  "diagnostic_codes": []
+}
