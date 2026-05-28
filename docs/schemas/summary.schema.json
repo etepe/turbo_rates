@@ -1,0 +1,287 @@
+{
+  "$defs": {
+    "ComparisonRowOut": {
+      "additionalProperties": false,
+      "description": "Market-vs-scenario comparison row in the persisted Summary.",
+      "properties": {
+        "tenor": {
+          "title": "Tenor",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "pillar",
+            "forward"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "start_date": {
+          "format": "date",
+          "title": "Start Date",
+          "type": "string"
+        },
+        "end_date": {
+          "format": "date",
+          "title": "End Date",
+          "type": "string"
+        },
+        "days_to_maturity": {
+          "title": "Days To Maturity",
+          "type": "integer"
+        },
+        "market_rate_act365": {
+          "title": "Market Rate Act365",
+          "type": "number"
+        },
+        "scenario_rate_act365": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scenario Rate Act365"
+        },
+        "spread_bps": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Spread Bps"
+        }
+      },
+      "required": [
+        "tenor",
+        "kind",
+        "start_date",
+        "end_date",
+        "days_to_maturity",
+        "market_rate_act365"
+      ],
+      "title": "ComparisonRowOut",
+      "type": "object"
+    },
+    "ConfigSnapshot": {
+      "additionalProperties": false,
+      "description": "Pipeline configuration snapshot embedded in every Summary for reproducibility.",
+      "properties": {
+        "day_count": {
+          "title": "Day Count",
+          "type": "string"
+        },
+        "interpolation": {
+          "title": "Interpolation",
+          "type": "string"
+        },
+        "business_day_convention": {
+          "title": "Business Day Convention",
+          "type": "string"
+        },
+        "bullet_until": {
+          "title": "Bullet Until",
+          "type": "string"
+        },
+        "calendar": {
+          "title": "Calendar",
+          "type": "string"
+        },
+        "band_bps": {
+          "title": "Band Bps",
+          "type": "integer"
+        },
+        "horizon_business_days": {
+          "title": "Horizon Business Days",
+          "type": "integer"
+        },
+        "initial_tlref": {
+          "title": "Initial Tlref",
+          "type": "number"
+        }
+      },
+      "required": [
+        "day_count",
+        "interpolation",
+        "business_day_convention",
+        "bullet_until",
+        "calendar",
+        "band_bps",
+        "horizon_business_days",
+        "initial_tlref"
+      ],
+      "title": "ConfigSnapshot",
+      "type": "object"
+    },
+    "DiagnosticOut": {
+      "additionalProperties": false,
+      "description": "Diagnostic record in the persisted Summary.",
+      "properties": {
+        "severity": {
+          "enum": [
+            "WARN",
+            "ERROR"
+          ],
+          "title": "Severity",
+          "type": "string"
+        },
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "context": {
+          "additionalProperties": true,
+          "title": "Context",
+          "type": "object"
+        }
+      },
+      "required": [
+        "severity",
+        "code",
+        "message"
+      ],
+      "title": "DiagnosticOut",
+      "type": "object"
+    },
+    "ForwardRow": {
+      "additionalProperties": false,
+      "description": "Forward-ladder entry in the persisted Summary.",
+      "properties": {
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "start_date": {
+          "format": "date",
+          "title": "Start Date",
+          "type": "string"
+        },
+        "end_date": {
+          "format": "date",
+          "title": "End Date",
+          "type": "string"
+        },
+        "rate": {
+          "title": "Rate",
+          "type": "number"
+        }
+      },
+      "required": [
+        "label",
+        "start_date",
+        "end_date",
+        "rate"
+      ],
+      "title": "ForwardRow",
+      "type": "object"
+    },
+    "PillarOut": {
+      "additionalProperties": false,
+      "description": "Bootstrapped pillar row in the persisted Summary.",
+      "properties": {
+        "tenor_code": {
+          "title": "Tenor Code",
+          "type": "string"
+        },
+        "tenor_days": {
+          "title": "Tenor Days",
+          "type": "integer"
+        },
+        "end_date": {
+          "format": "date",
+          "title": "End Date",
+          "type": "string"
+        },
+        "rate": {
+          "title": "Rate",
+          "type": "number"
+        },
+        "discount_factor": {
+          "title": "Discount Factor",
+          "type": "number"
+        }
+      },
+      "required": [
+        "tenor_code",
+        "tenor_days",
+        "end_date",
+        "rate",
+        "discount_factor"
+      ],
+      "title": "PillarOut",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Top-level persisted summary. The IO contract for both human users\n(pretty-printed JSON) and the V3 web UI (typed schema).\n\nFields are in stable order; reordering is a schema_version bump per A6.",
+  "properties": {
+    "schema_version": {
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "valuation_date": {
+      "format": "date",
+      "title": "Valuation Date",
+      "type": "string"
+    },
+    "as_of_timestamp": {
+      "format": "date-time",
+      "title": "As Of Timestamp",
+      "type": "string"
+    },
+    "pillars": {
+      "items": {
+        "$ref": "#/$defs/PillarOut"
+      },
+      "title": "Pillars",
+      "type": "array"
+    },
+    "forward_ladder": {
+      "items": {
+        "$ref": "#/$defs/ForwardRow"
+      },
+      "title": "Forward Ladder",
+      "type": "array"
+    },
+    "comparison": {
+      "items": {
+        "$ref": "#/$defs/ComparisonRowOut"
+      },
+      "title": "Comparison",
+      "type": "array"
+    },
+    "diagnostics": {
+      "items": {
+        "$ref": "#/$defs/DiagnosticOut"
+      },
+      "title": "Diagnostics",
+      "type": "array"
+    },
+    "config_snapshot": {
+      "$ref": "#/$defs/ConfigSnapshot"
+    }
+  },
+  "required": [
+    "schema_version",
+    "valuation_date",
+    "as_of_timestamp",
+    "pillars",
+    "forward_ladder",
+    "comparison",
+    "diagnostics",
+    "config_snapshot"
+  ],
+  "title": "Summary",
+  "type": "object"
+}
