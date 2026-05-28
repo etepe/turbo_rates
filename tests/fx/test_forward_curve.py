@@ -76,15 +76,75 @@ def test_pillars_dataframe_is_defensive_copy() -> None:
 
 
 @pytest.mark.phase7
-@pytest.mark.skip(reason="V2 — interpolation not yet implemented")
-def test_forward_at_log_linear_returns_expected_value() -> None:
-    """When V2 lands: between two pillars (P1, P2), forward_at(mid) equals
-    ``exp((1-w)*log(F1) + w*log(F2))`` with w = (mid - P1)/(P2 - P1)."""
-    raise NotImplementedError
+def test_forward_at_anchors_to_spot() -> None:
+    """At spot_date, forward_at returns spot_rate exactly."""
+    curve = FXForwardCurve(
+        pair_code="USDTRY",
+        spot_date=date(2026, 6, 15),
+        spot_rate=32.5,
+        pillars_tuple=(_pillar(30, 32.7),),
+    )
+    assert curve.forward_at(date(2026, 6, 15)) == 32.5
 
 
 @pytest.mark.phase7
-@pytest.mark.skip(reason="V2 — interpolation not yet implemented")
-def test_forward_at_anchors_to_spot() -> None:
-    """At spot_date, forward_at returns spot_rate exactly."""
-    raise NotImplementedError
+def test_forward_at_exact_at_each_pillar() -> None:
+    """forward_at(pillar.settle_date) returns the pillar's forward_rate exactly."""
+    pillars = (_pillar(30, 32.7), _pillar(90, 33.1), _pillar(180, 33.9))
+    curve = FXForwardCurve(
+        pair_code="USDTRY",
+        spot_date=date(2026, 6, 15),
+        spot_rate=32.5,
+        pillars_tuple=pillars,
+    )
+    for p in pillars:
+        assert curve.forward_at(p.settle_date) == p.forward_rate
+
+
+@pytest.mark.phase7
+def test_forward_at_log_linear_between_spot_and_first_pillar() -> None:
+    """Half-way between spot and first pillar: F = S * (F_p/S)^0.5."""
+    from math import sqrt
+
+    spot = 32.5
+    f_pillar = 33.5
+    curve = FXForwardCurve(
+        pair_code="USDTRY",
+        spot_date=date(2026, 6, 15),
+        spot_rate=spot,
+        pillars_tuple=(_pillar(60, f_pillar),),
+    )
+    mid = date(2026, 6, 15) + _td(30)
+    assert curve.forward_at(mid) == pytest.approx(spot * sqrt(f_pillar / spot), abs=1e-12)
+
+
+@pytest.mark.phase7
+def test_forward_at_log_linear_between_two_pillars() -> None:
+    """Between pillars P1, P2 with weight w: F = S * exp((1-w)*log(F1/S) + w*log(F2/S))."""
+    from math import exp, log
+
+    spot = 32.5
+    pillars = (_pillar(30, 32.7), _pillar(90, 33.4))
+    curve = FXForwardCurve(
+        pair_code="USDTRY",
+        spot_date=date(2026, 6, 15),
+        spot_rate=spot,
+        pillars_tuple=pillars,
+    )
+    target = date(2026, 6, 15) + _td(60)  # halfway between day 30 and day 90
+    expected = spot * exp(0.5 * log(32.7 / spot) + 0.5 * log(33.4 / spot))
+    assert curve.forward_at(target) == pytest.approx(expected, abs=1e-12)
+
+
+@pytest.mark.phase7
+def test_forward_at_rejects_dates_before_spot_or_after_last() -> None:
+    curve = FXForwardCurve(
+        pair_code="USDTRY",
+        spot_date=date(2026, 6, 15),
+        spot_rate=32.5,
+        pillars_tuple=(_pillar(30, 32.7),),
+    )
+    with pytest.raises(ValueError, match="DateOutOfRange"):
+        curve.forward_at(date(2026, 6, 14))
+    with pytest.raises(ValueError, match="DateOutOfRange"):
+        curve.forward_at(date(2099, 1, 1))
