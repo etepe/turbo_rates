@@ -6,7 +6,7 @@ grill-passed 2026-05-28 — F-301..F-307, D-1..D-17, OQ-401..OQ-406),
 diagnostics, §9 FX-O* decisions), `docs/fx-io-architecture.md` (v0.3.0 IO/CLI/app
 wiring, M-108..M-112), `docs/architecture.md` (V1 OIS bootstrap reference).
 **Date:** 2026-05-28
-**Status:** Draft — Pending Validation (grill-me + human)
+**Status:** Validated (grill-passed MON-020, 2026-05-28)
 **Ticket:** MON-020
 
 This document turns the locked V0.4 requirements into an implementable design.
@@ -14,8 +14,16 @@ It freezes module boundaries, the exact strip mathematics, the FXSummary v2
 schema diff, the diagnostic-code changes, and a module-by-module build order so
 the implementation (MON-021-*) is traceable to documented decisions before any
 math is written. **No new modelling decisions are introduced here** — every
-choice traces to a locked D-1..D-17 / OQ-401..OQ-406 resolution, plus two
-architect-level decisions confirmed with the user (A-1, A-2 in §8).
+choice traces to a locked D-1..D-17 / OQ-401..OQ-406 resolution, plus the
+architect-level decisions confirmed with the user (A-1..A-8 in §8).
+
+**Grill-revised (MON-020, 2026-05-28):** this revision incorporates the
+stress-test outcomes — OQ-501 resolved (decline the C-108 extension; pricer
+interpolates the stored curve), the basis-source contract made explicit (quote
+values do not enter the strip), the parity-gate semantics pinned to the *quoted*
+basis, OQ-505 given an explicit no-extrapolation ERROR, and the OIS-embedding
+rationale (DV-2 / D-16) re-stated as audit + MtM-readiness rather than a pricing
+re-solve. See §8 (A-3..A-8 updated) and §9.
 
 ---
 
@@ -26,9 +34,9 @@ unchanged. V0.4 adds four delta-drivers specific to closing the V3 strip:
 
 | # | Driver | Consequence for this design |
 |---|--------|------------------------------|
-| **DV-1** (complexity / risk) | The strip equation is the hard, novel part. A par xccy basis swap net-PV=0 calibration over the dual OIS curves **and** the full FX forward curve (Method (i), D-11) is the highest-risk numeric in V0.4. | Strip math (M-106) + pricer (M-107) get **opus**; everything else (schedule helper, schema, app wiring, fixture) is mechanical. Reprice assert (`FX_XCCY_REPRICE_FAIL`, D-13) gates correctness exactly as V1 `BS_REPRICE_FAIL` does. |
-| **DV-2** (change / coupling) | Pricing must reconstruct **both** OIS curves from the persisted summary — the pricing path can no longer pass `None` (`_UNUSED_OIS`). | `FXSummary` v2 embeds dom/for OIS pillar lists + per-ccy meta (D-16); reconstruction adapters live in `rates.app` (no `rates.io` → `rates.fx` cycle, no `rates.fx` → `rates.io`). |
-| **DV-3** (correctness / consistency) | The FX forward surface and the xccy basis surface are no longer decoupled: a non-zero basis ⟺ forwards deviating from CIP. | `FX_PARITY_MISMATCH` becomes a **basis-aware** gate (D-12): it compares the market forwards against `CIP + stripped basis`, not pure CIP. Fixture forwards are regenerated to embed the −180 bps basis (A-1) so the gate is meaningful, not vacuous. |
+| **DV-1** (complexity / risk) | The strip equation is the hard, novel part. A par xccy basis swap net-PV=0 calibration over the dual OIS curves **and** the full FX forward curve (Method (i), D-11) is the highest-risk numeric in V0.4. | Strip math (M-106) gets **opus**; the V0.4 pricer (M-107) is now an interpolating accessor (post-OQ-501) and drops to **sonnet**; everything else (schedule helper, schema, app wiring, fixture) is mechanical. Reprice assert (`FX_XCCY_REPRICE_FAIL`, D-13) gates correctness exactly as V1 `BS_REPRICE_FAIL` does. |
+| **DV-2** (change / coupling) | The persisted FX summary is the single audit record of *which* curves produced the basis, and the FX layer is being kept **MtM-ready** (a future MtM xccy pricer re-solves against the dual OIS curves). The legacy `_UNUSED_OIS = cast(OISCurve, None)` placeholder is a lie in the pricing path and must go. | `FXSummary` v2 embeds dom/for OIS pillar lists + per-ccy meta (D-16) for **reproducibility + MtM-readiness** (note: post-OQ-501 the V0.4 interpolating pricer does *not* consume these — see §8 A-4/A-8); reconstruction adapters in `rates.app` replace `_UNUSED_OIS` with the real curves (no `rates.io` → `rates.fx` cycle, no `rates.fx` → `rates.io`), exercised by a round-trip test. |
+| **DV-3** (correctness / consistency) | The FX forward surface and the xccy basis surface are no longer decoupled: a non-zero basis ⟺ forwards deviating from CIP. Under Method (i) the basis is **derived from the forwards** (forward-vs-CIP deviation), so the XCCY_BASIS quote *values* are not strip inputs — only their tenor grid + sign are (see §5.4). | `FX_PARITY_MISMATCH` becomes a **basis-aware** gate (D-12) that compares the **forward-implied** basis against the **quoted** basis (not against the stripped basis, which would be vacuous by construction). Fixture forwards are regenerated to embed the −180 bps basis (A-1) so forward-implied ≈ quoted and the gate passes meaningfully; if production forwards and quotes disagree the gate fires WARN and the forward-implied basis wins. |
 | **DV-4** (reuse / boundary discipline) | xccy legs are **quarterly (3M)**; the V1 annual/bullet schedule cannot be reused (requirements §5 constraint). | A dedicated quarterly schedule generator is added as a **new module** `rates.fx.schedule` (M-113, A-2) rather than a private helper, so it is independently unit-testable and reusable by a future MtM/pricer path. |
 
 **No new external dependencies.** No `rates.core` edits. Layering (`rates.fx` →
@@ -64,7 +72,7 @@ not flagged — single code path.
 |----|--------|--------|------------------------|------------|-------|----------|
 | **M-113** | `rates.fx.schedule` | **new** | Quarterly (3M) coupon-schedule generator for xccy legs: joint-calendar-rolled, single Act/360, back stub ending exactly on maturity. | medium | **opus** | F-303 |
 | **M-106** | `rates.fx.bootstrap_basis` | **rewrite body** | Strip each xccy basis pillar via sequential par→pillar net-PV=0 calibration (Method (i)): foreign leg converted at the full FX forward curve, discounted on dom OIS. brentq + reprice assert. Removes `_ = (...)` discard. | **high** | **opus** | F-301 |
-| **M-107** | `rates.fx.pricer` | **rewrite `price_xccy_basis_swap`** | Price a par xccy basis swap at an arbitrary maturity by re-running the same net-PV=0 solve against dom/for OIS + FX forward + stripped basis term-structure. No discarded args. | **high** | **opus** | F-302 |
+| **M-107** | `rates.fx.pricer` | **rewrite `price_xccy_basis_swap`** | Return the fair basis spread at an arbitrary maturity by **interpolating the stripped term-structure** (FX-O2 piecewise-linear bps); at a calibrated pillar returns the stored `b_n` (round-trip identity). Signature **unchanged** (C-108 frozen — OQ-501 declined the extension); `dom_ois`/`for_ois` kept, reserved for MtM, documented. | medium | sonnet | F-302 |
 | **M-109** | `rates.io.schemas` (FX) | **extend** | `FX_SCHEMA_VERSION` 1→2; add `dom_ois_pillars` / `for_ois_pillars` (`PillarOut` ×2) + per-ccy `FXOisMeta` blocks + per-basis-pillar `strip_residual`. | low | sonnet | F-304 |
 | **M-111** | `rates.app` (FX) | **extend** | Persist OIS pillars into FXSummary v2; add `_dom_ois_from_summary` / `_for_ois_from_summary` reconstruction adapters; delete `_UNUSED_OIS`; `run_fx_price_xccy` reconstructs both OIS curves and passes them to the calibrated pricer. | medium | sonnet | F-304, F-305 |
 | **M-110** | `rates.io.persistence` (FX) | **touch (mapper)** | `FXSummary.from_domain` call site gains the two OIS curves + strip residuals; Parquet partition shape unchanged. | low | haiku | F-304 |
@@ -75,7 +83,7 @@ not flagged — single code path.
 | Feature | Modules |
 |---------|---------|
 | F-301 Par xccy strip (net PV=0) | M-106 (+ M-113 schedule, consumes M-103/M-105 forward, dual OIS) |
-| F-302 Calibrated pricer | M-107 (+ M-113, M-106 shared core) |
+| F-302 Calibrated pricer | M-107 (interpolates M-104 basis curve; no re-solve — OQ-501) |
 | F-303 Quarterly schedule | M-113 |
 | F-304 FXSummary v2 + OIS pillars + strip diag | M-109, M-110, M-111 |
 | F-305 Pricing-side OIS reconstruction (remove `_UNUSED_OIS`) | M-111 |
@@ -111,20 +119,20 @@ not flagged — single code path.
       "complexity": "high",
       "suggested_agent": "opus",
       "modified_file": "src/rates/fx/bootstrap_basis.py",
-      "implementation_note": "Signature is already stable (C-104). Remove the `_ = (dom_ois, for_ois, fx_forward, fx_convention)` discard. The strip core (net-PV residual fn + sequential solve) is shared with M-107 via a private module-level helper so the pricer round-trips identically (F-302)."
+      "implementation_note": "Signature gains dom_calendar/for_calendar (C-104'); remove the `_ = (dom_ois, for_ois, fx_forward, fx_convention)` discard. Emit FX_XCCY_FORWARD_COVERAGE (ERROR) if the forward curve's last pillar precedes the longest xccy coupon date (OQ-505) — no silent extrapolation. The strip core is self-contained in M-106; the pricer (M-107) does NOT share it (it only interpolates the produced curve, OQ-501)."
     },
     {
       "module_id": "M-107",
       "name": "rates.fx.pricer (price_xccy_basis_swap rewrite)",
-      "responsibility": "Price a par xccy basis swap at an arbitrary maturity by solving net-PV=0 for the fair flat spread, consistent with the stripped term-structure.",
+      "responsibility": "Return the fair basis spread at a maturity by interpolating the stripped term-structure (FX-O2 piecewise-linear bps); at a calibrated pillar returns the stored b_n (round-trip identity).",
       "owns_data": [],
-      "depends_on": ["M-104", "M-103", "M-113", "rates.core.curve", "M-106 (shared strip core)"],
-      "external_deps": ["scipy.optimize.brentq"],
+      "depends_on": ["M-104 (basis_curve.basis_at)"],
+      "external_deps": [],
       "features_served": ["F-302"],
-      "complexity": "high",
-      "suggested_agent": "opus",
+      "complexity": "medium",
+      "suggested_agent": "sonnet",
       "modified_file": "src/rates/fx/pricer.py",
-      "implementation_note": "Signature C-108 unchanged; the FX forward curve is reachable via the basis curve? NO — C-108 has no fx_forward arg. See C-108 note in section 4: the pricer at a CALIBRATED pillar returns the stored stripped spread (round-trip identity, F-302 AC#1); between pillars it interpolates under the curve's documented convention (FX-O2 piecewise-linear bps, F-302 AC#2). A full re-solve at arbitrary maturity needs the FX forward curve, which is NOT in C-108 today — handled by the contract-extension decision in section 4 (C-108')."
+      "implementation_note": "Signature C-108 UNCHANGED (OQ-501 declined the extension — see §4 / §9). The pricer is `return basis.basis_at(maturity_date)`: at a calibrated pillar this is the stored b_n (round-trip identity, F-302 AC#1); between pillars it is the curve's FX-O2 piecewise-linear-bps interpolation (F-302 AC#2, narrowed to 'value of the stripped term-structure at m', NOT a fresh par-swap re-solve). `dom_ois`/`for_ois` remain in the signature but are unused by V0.4 — kept for MtM-readiness and DOCUMENTED as such in the docstring (no `_ = (...)` discard lie; they are real reconstructed curves at the call site, replacing `_UNUSED_OIS`). No brentq, no FX forward needed."
     },
     {
       "module_id": "M-109",
@@ -171,9 +179,11 @@ not flagged — single code path.
 
 ## 4. Interface Contracts
 
-Contract IDs continue from V2 (which ended at C-108). **Two existing contracts
-change semantics without changing signature** (C-104, C-108); one is **extended**
-(C-108'); two are **new** (C-109, C-110).
+Contract IDs continue from V2 (which ended at C-108). **One existing contract
+gains parameters** (C-104' — `build_cross_basis_curve` gains the two calendars);
+**C-108 stays frozen** (signature unchanged, body de-stubbed — OQ-501 declined
+the extension); **C-102' is extended** (`FXSummary.from_domain`); **two are new**
+(C-109 schedule, C-110 OIS reconstruction).
 
 ```json
 {
@@ -225,20 +235,18 @@ change semantics without changing signature** (C-104, C-108); one is **extended*
       }
     },
     {
-      "contract_id": "C-108'",
+      "contract_id": "C-108",
       "from": "rates.app (M-111), rates.cli",
       "to": "M-107 (price_xccy_basis_swap)",
       "type": "function_call",
       "interface": {
-        "name": "price_xccy_basis_swap  (SIGNATURE EXTENDED)",
-        "input_v2_was": "(basis: CrossCurrencyBasisCurve, dom_ois: OISCurve, for_ois: OISCurve, maturity_date: date)",
-        "input_v04": "(basis: CrossCurrencyBasisCurve, dom_ois: OISCurve, for_ois: OISCurve, fx_forward: FXForwardCurve, maturity_date: date, *, dom_calendar: HolidayCalendar, for_calendar: HolidayCalendar, day_count: DayCount)",
+        "name": "price_xccy_basis_swap  (SIGNATURE UNCHANGED — OQ-501 declined the extension)",
+        "input": "(basis: CrossCurrencyBasisCurve, dom_ois: OISCurve, for_ois: OISCurve, maturity_date: date)  — IDENTICAL to v0.3.0",
         "output": "float  (fair basis spread in bps, signed per basis.quoted_on_foreign)",
         "error_cases": [
-          "ValueError: maturity_date out of range on basis / fx_forward",
-          "FXBootstrapNonConvergentError: solve fails at the requested maturity"
+          "ValueError: maturity_date out of range on basis (before spot / after last pillar)"
         ],
-        "rationale": "F-302 AC#2 (arbitrary maturity between pillars) requires re-running the net-PV=0 solve, which needs the FX forward curve + schedule inputs. The V2 signature could not do this (no fx_forward). C-108 is therefore EXTENDED, not merely de-stubbed. At a CALIBRATED pillar maturity the solve reproduces the stored stripped spread within 1e-9 (round-trip identity, AC#1). The persisted FXSummary v2 already carries forward_pillars, so M-111 reconstructs fx_forward via the existing _fx_forward_from_summary adapter — no extra persistence."
+        "rationale": "OQ-501 RESOLVED: AC#2 is narrowed to 'value of the stripped term-structure at the requested maturity', not 'fair flat spread of a freshly re-solved par swap to that maturity'. The two differ when the curve is non-flat (a par swap's flat spread to T_n is NOT the marginal b_n); interpolating the stored curve is the representation-consistent choice and keeps C-108 frozen. Body becomes `return basis.basis_at(maturity_date)` — the `_ = (dom_ois, for_ois)` discard is removed by passing real reconstructed curves at the call site (held for MtM, documented), NOT by adding fx_forward. No FX forward, no calendars, no day-count, no brentq enter the pricer."
       }
     },
     {
@@ -276,16 +284,14 @@ change semantics without changing signature** (C-104, C-108); one is **extended*
 
 ### Contract notes
 
-- **One genuine signature change** (`build_cross_basis_curve` gains
-  `dom_calendar` / `for_calendar`) and **one extension**
-  (`price_xccy_basis_swap` gains `fx_forward` + keyword schedule inputs). Both
-  remain consumer-owned: `rates.app` already holds the calendars and the FX
-  forward curve at every call site. The requirements' "signatures are stable —
-  V0.4 fills the bodies" (Implementation Hints §8) holds for the **strip core**;
-  the pricer's arbitrary-maturity re-solve (F-302 AC#2) genuinely needs the
-  forward curve, so the extension is unavoidable and is called out here rather
-  than smuggled in. *(Flag for grill: is extending C-108 acceptable, or should
-  AC#2 be narrowed to "interpolate stored pillars only", keeping C-108 as-is?)*
+- **Exactly one genuine signature change** (`build_cross_basis_curve` gains
+  `dom_calendar` / `for_calendar`); it stays consumer-owned (`rates.app` already
+  holds both calendars at the call site). **`price_xccy_basis_swap` is NOT
+  extended** — OQ-501 was resolved in favour of keeping C-108 frozen and
+  narrowing F-302 AC#2 to interpolation of the stored curve. The requirements'
+  "signatures are stable — V0.4 fills the bodies" (Implementation Hints §8) thus
+  holds for the **pricer** as well; only the strip's body-fill needs the one
+  calendar parameter to build the schedule (C-109).
 - **No untyped dicts cross seams.** `XccySchedule` is a frozen dataclass;
   `FXOisMeta` is a Pydantic model.
 - **Exit-code policy unchanged** (0 = WARN-only, 2 = any ERROR).
@@ -353,7 +359,18 @@ regardless; that is the bug grill-me caught.
 ### 5.4 Sequential par→pillar strip (D-13)
 
 Pillars are the quoted xccy tenors `T_1 < ... < T_M` (the quote vector supplies
-the maturity grid + sign). The stripped term-structure `b(t)` is piecewise-flat:
+the maturity grid + sign). **The XCCY_BASIS quote *values* are NOT strip
+inputs.** Under Method (i) the basis is defined as the forward-vs-CIP deviation
+(§5.3), so each `b_n` is determined entirely by the forwards `F(t_i)` and the two
+OIS curves — `b_n` carries no quote term (note the formula below has none). The
+quote contributes only the maturity grid `{T_n}` and the sign of
+`quoted_on_foreign`. The quoted value itself is reconciled against the
+forward-implied basis by the basis-aware `FX_PARITY_MISMATCH` gate (§7), never
+fed into the solve. Consequence for production: when market forward points and
+xccy basis quotes come from different sources and disagree, the forwards win and
+the gate WARNs — they cannot both be honoured under Method (i).
+
+The stripped term-structure `b(t)` is piecewise-flat:
 `b(t) = b_k` for `t ∈ (T_{k-1}, T_k]`. For pillar `n`, the par swap maturing at
 `T_n` must reprice to zero with `b_1..b_{n-1}` fixed. Since `NPV` is **linear in
 `b_n`**, define the period-`n` **basis annuity** (domestic units):
@@ -381,15 +398,20 @@ for numerical conditioning. **Document this normalization in the docstring.**
 
 ### 5.5 Pricer (F-302)
 
-`price_xccy_basis_swap` at maturity `m`:
-- **`m` equals a calibrated pillar `T_n`:** return the stored `b_n` (round-trip
-  identity, AC#1 — the solve reproduces it to `1e-9`).
-- **`m` between pillars:** §5.4 with `T_n := m` and the term-structure `b_1..b_{n-1}`
-  from the curve over `(T_0, m)`, solving for the single flat fair spread that
-  zeroes the par swap to `m`. The returned value is interpolated under the
-  curve's documented convention (FX-O2 piecewise-linear bps) **only** when the
-  contract-extension (C-108') is declined; otherwise it is the freshly solved
-  fair spread. *(Grill decision point — see §4 note and §9 OQ-501.)*
+`price_xccy_basis_swap` is `return basis.basis_at(maturity_date)` (OQ-501: AC#2
+narrowed to interpolation, C-108 frozen). At maturity `m`:
+- **`m` equals a calibrated pillar `T_n`:** `basis_at(T_n)` returns the stored
+  `b_n` exactly (round-trip identity, AC#1 — to machine precision; the strip's
+  closed-form is exact and the reprice assert pins `|NPV| < 1e-9`).
+- **`m` between pillars:** `basis_at(m)` interpolates the stored term-structure
+  under the curve's documented convention (FX-O2 piecewise-linear bps).
+
+This is deliberately **not** a fresh par-swap re-solve. A re-solve would return
+the fair *flat* spread of a par swap maturing at `m`, which differs from the
+curve's *marginal* `b(m)` whenever the curve is non-flat — mixing the two
+representations was the inconsistency OQ-501 removed. The pricer therefore needs
+neither the FX forward curve nor the schedule; `dom_ois`/`for_ois` stay in the
+signature only for MtM-readiness (documented, unused in V0.4).
 
 ---
 
@@ -426,10 +448,13 @@ class FXOisMeta(BaseModel):
 **Reconstruction (C-110):** `_dom_ois_from_summary` / `_for_ois_from_summary`
 rebuild `OISCurve` from `*_ois_pillars` + `*_ois_meta`, mirroring
 `_curve_from_summary` (pillar `start_date := meta.valuation_date` per G10).
-`forward_ladder_dates` is reconstructed empty — the strip uses only `df_at`, and
-the FX pricing path never calls `OISCurve.forward`. *(Grill: confirm empty ladder
-does not trip an `OISCurve.__post_init__` invariant — if it does, persist a
-minimal ladder or relax the check; flagged as OQ-502.)*
+`forward_ladder_dates` is reconstructed empty (`()`) — the strip uses only
+`df_at`, and the FX pricing path never calls `OISCurve.forward`. **OQ-502
+RESOLVED (verified against `src/rates/core/curve.py`):** `OISCurve.__post_init__`
+validates only the interpolation scheme, a non-empty `pillars_tuple`, and
+strictly-increasing `end_date`s — there is **no invariant on
+`forward_ladder_dates`**, so an empty tuple is accepted. No minimal ladder or
+invariant relaxation is needed.
 
 ### 6.2 Fixture regeneration (F-306, A-1: keep −180 bps)
 
@@ -458,28 +483,46 @@ The committed CSV header comment is updated: forwards now embed −180 bps basis
 (not CIP-tight). The `--regenerate` flow recomputes both forwards and the basis
 quote to stay mutually consistent after any math change.
 
+**Independent ground-truth anchor (grill G-2 — mandatory).** Steps 4 + 6 above
+are a *self-consistency* round-trip: they embed `b*` by inverting §5.4 and then
+recover it with §5.4, so a sign error or wrong day-count in §5.4 would pass
+undetected (the inversion shares the bug). The smoke gate must therefore be
+backed by **two independent `phase9` checks that do NOT use the production strip
+code to generate their expected value**:
+
+1. **Hand-computed analytic micro-case (1–2 periods):** a tiny fixture with a
+   known forward deviation from CIP whose basis is worked out by hand on paper,
+   asserting the strip reproduces it. **The expected value is computed with the
+   currency-native day-counts (TRY Act/365, USD Act/360)**, deliberately *not*
+   the V0.4 Act/360-both-legs simplification (D-14). The delta between the
+   hand value and the strip output thus **measures the OQ-403 day-count bias**
+   rather than hiding it — the bias becomes a documented, asserted-bounded number
+   instead of a blind spot.
+2. **CIP-tight degeneracy:** parity-tight forwards (`F = F_CIP`) ⇒ stripped
+   `b ≈ 0` to `1e-9` (already in the Phase-2 deliverable; this is the second
+   independent anchor and exercises §5.3).
+
 ---
 
 ## 7. Diagnostic Codes
 
 | Code | Severity | Change | Trigger |
 |------|----------|--------|---------|
-| `FX_XCCY_REPRICE_FAIL` | ERROR | **new** (add to `rates.fx.types`, `__all__`) | Strip/price reprice residual `|NPV(s*)| >= 1e-9` (D-13). Mirrors V1 `BS_REPRICE_FAIL`. |
-| `FX_PARITY_MISMATCH` | WARN | **semantics change** (D-12) | Now **basis-aware**: fires when market forward `F(t)` deviates from `CIP(t) · (1 + basis adjustment)` — i.e. genuine forward-vs-(CIP+stripped-basis) inconsistency. Was: forward vs pure CIP. Threshold `PARITY_MISMATCH_BPS = 1.0` unchanged. |
+| `FX_XCCY_REPRICE_FAIL` | ERROR | **new** (add to `rates.fx.types`, `__all__`) | Strip reprice residual `|NPV(b_n*)| >= 1e-9` (D-13). Mirrors V1 `BS_REPRICE_FAIL`. (Pricer no longer reprices — interpolation only, OQ-501.) |
+| `FX_PARITY_MISMATCH` | WARN | **semantics change** (D-12) | Now **basis-aware**: fires when the **forward-implied** basis (the `b_n` the strip derives from `F(t)`) deviates from the **quoted** XCCY_BASIS spread by more than `PARITY_MISMATCH_BPS = 1.0`. This is the reconciliation of the two market sources (§5.4) — NOT a forward-vs-(CIP+stripped) check, which would be vacuous because the stripped basis is *defined* from the forwards. Was: forward vs pure CIP. |
+| `FX_XCCY_FORWARD_COVERAGE` | ERROR | **new** (add to `rates.fx.types`, `__all__`) | The FX forward curve's last pillar settle-date is **before** the longest xccy coupon date (OQ-505). The strip would have to extrapolate `forward_at` past its range; instead it aborts (curve not produced). No silent extrapolation. |
 | `FX_BOOTSTRAP_NON_CONVERGENT` | ERROR | **reused** (already declared) | brentq cannot bracket/converge a pillar. |
 | `FX_PRICE_SCHEMA_TOO_OLD` | ERROR | **new** | Pricing reads a v1 summary (no OIS pillars); cannot reconstruct dom/for OIS — abort (C-110). |
 | `FX_BASIS_INVERTED`, `FX_XCCY_QUOTE_SKIPPED` | WARN | unchanged | as v0.3.0. |
 
-**`FX_PARITY_MISMATCH` relocation:** the basis-aware check still lives in M-105
-(`bootstrap_forward._warn_parity_mismatches`) but must now receive the stripped
-basis curve. Ordering problem: M-105 (forward) runs **before** M-106 (basis) in
-`_run_fx_pipeline`. **Resolution:** move the parity check to **after** the basis
-strip — either (a) call `_warn_parity_mismatches(...)` from the orchestrator
-once both `fx_forward` and `basis` exist, passing the basis curve in; or (b) keep
-M-105's pure-CIP WARN as an early signal and add the authoritative basis-aware
-check post-strip in M-106/orchestrator. **This design chooses (a):** M-105 stops
-emitting the parity WARN; the orchestrator runs the basis-aware check after the
-strip. *(Grill: confirm (a) over (b); (b) double-reports. Flagged OQ-503.)*
+**`FX_PARITY_MISMATCH` relocation:** the basis-aware check needs both the
+**forward-implied** basis (the strip's `b_n`) and the **quoted** basis (from
+`FXMarketData`), so it can only run **after** the strip. Ordering problem: M-105
+(forward) runs **before** M-106 (basis) in `_run_fx_pipeline`. **Resolution
+(A-6):** the orchestrator calls the basis-aware check once both `fx_forward` and
+the stripped `basis` exist, comparing `b_n` against the quoted spread per pillar;
+M-105 stops emitting the old pure-CIP WARN (no double-reporting). OQ-503 resolved
+in favour of this single authoritative post-strip gate.
 
 ---
 
@@ -490,22 +533,26 @@ strip. *(Grill: confirm (a) over (b); (b) double-reports. Flagged OQ-503.)*
 | A-1 | Fixture basis direction | **Keep −180 bps; embed in FX forwards** | Move basis to ~0 (parity-tight forwards) | User-confirmed. Exercises the real V0.4 numeric; keeps the basis-aware gate meaningful. Maps F-307/D-12. |
 | A-2 | Quarterly schedule placement | **New module `rates.fx.schedule` (M-113)** | Private helper in `bootstrap_basis.py` | User-confirmed. Independent unit tests; reused by both M-106 and M-107; MtM-ready. Maps F-303/DV-4. |
 | A-3 | Strip solver | brentq + closed-form seed | Closed-form only | D-6/D-13 (locked). MtM-readiness + V1-pattern consistency. |
-| A-4 | Pricer contract | **Extend C-108** (add `fx_forward` + schedule kwargs) | Keep C-108 as-is, narrow F-302 AC#2 | F-302 AC#2 (arbitrary maturity) needs a re-solve, which needs the forward curve. Surfaced for grill (OQ-501). |
+| A-4 | Pricer contract (OQ-501) | **Keep C-108 frozen; narrow F-302 AC#2 to interpolation** | Extend C-108 with `fx_forward` + schedule kwargs (re-solve) | **Grill-revised.** A re-solve returns a par swap's flat spread, which ≠ the curve's marginal `b(m)` when non-flat — mixing representations is inconsistent. Interpolating the stored curve is representation-consistent, simpler, and leaves the CLI untouched. Pricer = `basis.basis_at(m)`. |
 | A-5 | OIS persistence shape | `PillarOut` ×2 + `FXOisMeta` ×2 | New dedicated OIS-curve schema | D-16 (locked). Reuse the V1 model; minimal surface. |
-| A-6 | Parity-check placement | Post-strip, orchestrator-driven, M-105 stops emitting | Keep M-105 pure-CIP WARN + add second check | Avoids double-reporting; single authoritative basis-aware gate. (OQ-503.) |
+| A-6 | Parity-check placement (OQ-503) | Post-strip, orchestrator-driven; compares forward-implied vs quoted; M-105 stops emitting | Keep M-105 pure-CIP WARN + add second check | Avoids double-reporting; single authoritative reconciliation gate. |
 | A-7 | Reconstruction adapter location | `rates.app` (`_dom/_for_ois_from_summary`) | Classmethod on `OISCurve` / in `rates.io` | No `rates.io`→`rates.fx` or `rates.fx`→`rates.io` cycle; mirrors V1 `_curve_from_summary`. |
+| A-8 | OIS embedding justification (post-A-4) | **Keep D-16 OIS pillars + pricer `dom_ois`/`for_ois` params; re-state purpose as audit/reproducibility + MtM-readiness** | Trim OIS embedding + pricer params for a leaner V0.4 | **Grill-revised.** Since the interpolating pricer (A-4) no longer consumes the OIS curves, DV-2's original "pricing re-solve" rationale is void and is rewritten. The data is retained for audit + future-MtM (consistent with D-13's brentq-for-MtM ethos); `_UNUSED_OIS` is replaced by real reconstructed curves (round-trip tested), not by `None`. |
 
 ---
 
 ## 9. Open Architecture Questions (grill-fodder)
 
-| ID | Question | Provisional resolution | Risk if wrong |
-|----|----------|------------------------|---------------|
-| **OQ-501** | Should `price_xccy_basis_swap` (C-108) be **extended** with `fx_forward` for a true arbitrary-maturity re-solve (F-302 AC#2), or kept at its v0.3.0 signature with AC#2 narrowed to "interpolate stored pillars under FX-O2"? | **Extend (A-4)** — honour AC#2 literally. | Medium. Extension touches the CLI call site (`run_fx_price_xccy`) and any future `rates.cli` wiring. Narrowing is simpler but makes the pricer not a true par-swap pricer between pillars. |
-| **OQ-502** | Does reconstructing `OISCurve` with an **empty** `forward_ladder_dates` trip `OISCurve.__post_init__`? | Assume no (ladder is decorative for `df_at`); verify in M-111. | Low — if it trips, persist a minimal ladder or relax the invariant. |
-| **OQ-503** | Parity-check placement: orchestrator-driven post-strip (A-6) vs. keep M-105 early WARN + second authoritative check? | **Orchestrator post-strip (A-6).** | Low — both are correct; A-6 avoids double WARNs. |
-| **OQ-504** | Fixture forward-embedding closed form (§6.2 step 4): uniform forward-points shift vs. exact per-period inversion of §5.4? | Uniform shift if it reproduces `b*` within `1e-9`; else exact per-period. Document the chosen form in the script. | Low — internal to the smoke fixture; does not affect production math. |
-| **OQ-505** | 9M/12M FX forwards for the 1Y xccy swap are **beyond** the 6M forward-curve last pillar → `forward_at` raises (DateOutOfRange). Extrapolate, or require forward pillars out to the longest xccy maturity? | **Require forward pillars ≥ longest xccy maturity** (add 9M/12M forward points to the fixture) — no silent extrapolation, consistent with v0.3.0's no-extrapolation stance (`FX_PRICE_EXTRAPOLATION` is WARN-only for pricing, but the strip must not extrapolate silently). | **Medium-high.** If the forward curve does not cover the xccy schedule, the strip cannot run. Must be resolved before M-106 implementation. |
+All OQ-50x below were **resolved in the MON-020 grill** (2026-05-28). Status:
+✅ = closed; the resolution is now load-bearing in §§1–8.
+
+| ID | Question | Resolution (grill MON-020) | Status |
+|----|----------|----------------------------|--------|
+| **OQ-501** | Extend `price_xccy_basis_swap` (C-108) with `fx_forward` for a true arbitrary-maturity re-solve, or keep the v0.3.0 signature with AC#2 narrowed to interpolation? | **Keep C-108 frozen; narrow AC#2 to interpolation** (A-4 reversed). A re-solve's flat par spread ≠ the curve's marginal `b(m)`; interpolation is representation-consistent and leaves the CLI untouched. Pricer = `basis.basis_at(m)`. | ✅ |
+| **OQ-502** | Does reconstructing `OISCurve` with an empty `forward_ladder_dates` trip `__post_init__`? | **No** — verified in `src/rates/core/curve.py`: `__post_init__` checks only interp scheme + non-empty pillars + ascending `end_date`; no ladder invariant. Empty `()` is safe. | ✅ |
+| **OQ-503** | Parity-check placement: orchestrator post-strip (A-6) vs. M-105 early WARN + second check? | **Orchestrator post-strip (A-6)**, comparing forward-implied vs quoted basis; M-105 stops emitting. Single authoritative gate, no double WARN. | ✅ |
+| **OQ-504** | Fixture forward-embedding closed form (§6.2 step 4): uniform shift vs. exact per-period inversion? | Uniform shift if it reproduces `b*` within `1e-9`, else exact per-period; document the chosen form in the script. Internal to the smoke fixture; does not affect production math. | ✅ |
+| **OQ-505** | 9M/12M FX forwards for the 1Y xccy swap fall **beyond** the 6M forward-curve last pillar. Extrapolate, or require coverage? | **Require coverage; no silent extrapolation.** New `FX_XCCY_FORWARD_COVERAGE` ERROR when the forward curve's last pillar is before the longest xccy coupon date (curve not produced); fixture gains 9M/12M forward points. Resolved in §7; enforced in Phase 2 (M-106). | ✅ |
 
 ---
 
@@ -533,8 +580,8 @@ merge without user approval. New `phase9` pytest marker throughout.
       "name": "Strip core (M-106)",
       "branch": "feature/MON-021-v04-xccy-strip",
       "modules": ["M-106"],
-      "rationale": "The hard numeric. Lands on M-113 + existing forward/OIS curves. Reprice assert (FX_XCCY_REPRICE_FAIL) is the correctness gate. Resolve OQ-505 (forward coverage) here.",
-      "deliverable": "build_cross_basis_curve strips USDTRY pillars to net-PV=0 within 1e-9; EURTRY same code path covered by unit test (D-17); CIP-tight input -> b≈0 test; non-CIP input -> b matches target.",
+      "rationale": "The hard numeric. Lands on M-113 + existing forward/OIS curves. Reprice assert (FX_XCCY_REPRICE_FAIL) is the correctness gate. Enforce OQ-505 forward coverage (FX_XCCY_FORWARD_COVERAGE ERROR) here.",
+      "deliverable": "build_cross_basis_curve strips USDTRY pillars to net-PV=0 within 1e-9; brentq bracket [-10000,+10000] bps (documented; A_n>0 guarantees a single root); EURTRY same code path covered by unit test that TOGGLES quoted_on_foreign to exercise the sign branch (D-17); CIP-tight input -> b≈0 (1e-9) anchor; hand-computed analytic micro-case with native day-counts (grill G-2) -> measures+bounds the Act/360 bias; FX_XCCY_FORWARD_COVERAGE fires when forwards too short.",
       "estimated_effort": "large",
       "suggested_agent": "opus"
     },
@@ -553,10 +600,10 @@ merge without user approval. New `phase9` pytest marker throughout.
       "name": "Pricer + app wiring (M-107, M-111)",
       "branch": "feature/MON-021-v04-xccy-pricer-app",
       "modules": ["M-107", "M-111"],
-      "rationale": "Pricer shares the strip core (M-106). M-111 deletes _UNUSED_OIS, adds C-110 reconstruction, wires real OIS into the calibrated pricer. Resolve OQ-501/OQ-502/OQ-503 here.",
-      "deliverable": "round-trip identity (price at pillar == stored b within 1e-9); _UNUSED_OIS gone (grep clean, F-305 AC#2); run_fx_price_xccy prices on reconstructed curves; parity-aware gate post-strip.",
-      "estimated_effort": "large",
-      "suggested_agent": "opus"
+      "rationale": "Pricer is `basis.basis_at(m)` (OQ-501: no shared strip core, no re-solve). M-111 deletes _UNUSED_OIS, adds C-110 reconstruction, passes real reconstructed OIS into the pricer (held for MtM, A-8) and runs the post-strip parity gate (A-6/OQ-503). OQ-502 already verified.",
+      "deliverable": "round-trip identity (basis_at(T_n) == stored b_n); _UNUSED_OIS gone (grep clean, F-305 AC#2); run_fx_price_xccy prices on reconstructed curves; parity gate compares forward-implied vs quoted post-strip; M-107 ships as sonnet (interpolation only).",
+      "estimated_effort": "medium",
+      "suggested_agent": "sonnet"
     },
     {
       "phase": 5,
@@ -600,22 +647,30 @@ All must hold before the V0.4 release PR:
 
 ---
 
-## 12. Validation Checklist (review before implementation)
+## 12. Validation Checklist (grill outcomes — all resolved)
 
-1. **Strip math (§5):** is Method (i) + the sequential `b_n` formula correct, and
-   is the `N_dom`-cancels normalization sound?
-2. **Contract changes (§4):** are the `build_cross_basis_curve` calendar params
-   and the `price_xccy_basis_swap` `fx_forward` extension (OQ-501) acceptable, or
-   should AC#2 be narrowed to keep C-108 frozen?
-3. **OQ-505:** require forward pillars out to the longest xccy maturity (no silent
-   extrapolation)? This blocks M-106.
-4. **Schema v2 (§6):** is `PillarOut ×2 + FXOisMeta ×2 + per-pillar strip_residual`
-   the right shape, and is empty `forward_ladder_dates` on reconstruction safe
-   (OQ-502)?
-5. **Parity-check placement (§7, OQ-503):** orchestrator-driven post-strip (A-6)
-   vs. M-105 early + second check?
-6. **Build order (§10):** comfortable with M-113 → M-106 first, schema/wiring
-   after?
+The MON-020 grill (2026-05-28) closed every open item below. They are listed
+with their resolution for the implementation reviewer.
 
-Once confirmed, this document advances to **grill-me** (stress-test), then
-**Status: Validated**, then quant-developer implementation (MON-021-*) per §10.
+1. **Strip math (§5):** Method (i) + sequential `b_n` is well-posed; the `b_n`
+   formula carries **no quote term** — basis is forward-implied (§5.4 note). The
+   `N_dom`-cancels normalization is sound (`N_dom = 1`).
+2. **Contract changes (§4):** `build_cross_basis_curve` gains
+   `dom_calendar`/`for_calendar` (one consumer-owned change). **`price_xccy_basis_swap`
+   is NOT extended** — C-108 frozen, AC#2 narrowed to interpolation (OQ-501/A-4).
+3. **OQ-505:** require forward coverage to the longest xccy coupon; new
+   `FX_XCCY_FORWARD_COVERAGE` ERROR, no silent extrapolation (§7). Enforced in
+   Phase 2.
+4. **Schema v2 (§6):** `PillarOut ×2 + FXOisMeta ×2 + per-pillar strip_residual`
+   retained for audit + MtM (A-8); empty `forward_ladder_dates` reconstruction
+   verified safe (OQ-502).
+5. **Parity-check placement (§7, OQ-503):** orchestrator-driven post-strip (A-6),
+   comparing **forward-implied vs quoted** basis; M-105 stops emitting.
+6. **Validation robustness (G-2):** the smoke round-trip is backed by an
+   independent hand-computed analytic anchor (native day-counts, measures the
+   OQ-403 Act/360 bias) + the CIP-tight `b≈0` anchor (§6.2).
+7. **Build order (§10):** M-113 → M-106 first, schema/wiring after; M-107 drops
+   to sonnet (interpolation only).
+
+**Status: Validated** (requirements + architecture grill-passed). Next:
+quant-developer implementation (MON-021-*) per §10.
