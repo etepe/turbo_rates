@@ -29,6 +29,10 @@ from rates.core.curve import OISCurve
 from rates.core.diagnostics import Diagnostic
 from rates.core.report import ComparisonTable
 from rates.core.scenario import ScenarioResult
+from rates.fx.basis_curve import CrossCurrencyBasisCurve
+from rates.fx.conventions import FXConvention
+from rates.fx.forward_curve import FXForwardCurve
+from rates.fx.types import CurrencyPair
 
 #: V1 schema version embedded in every Summary.
 SCHEMA_VERSION: int = 1
@@ -223,11 +227,196 @@ class Summary(BaseModel):
         )
 
 
+# ---------------------------------------------------------------------------
+# FX persistence schemas (M-109, v0.3.0)
+# ---------------------------------------------------------------------------
+#
+# Persistence-side counterparts to rates.fx domain types. Consumed by M-110
+# (rates.io.persistence FX extension). The from_domain mapper lives there to
+# avoid pulling rates.fx imports into this module's V1 surface.
+#
+# Contract: feeds C-102 (rates.app → rates.io.persistence FX).
+
+#: FX summary schema version embedded in every FXSummary. Independent of
+#: SCHEMA_VERSION (V1 OIS) so the two can evolve separately.
+FX_SCHEMA_VERSION: int = 1
+
+
+class FXForwardPillarOut(BaseModel):
+    """Forward-curve pillar in the persisted FXSummary."""
+
+    model_config = _FROZEN
+
+    tenor_code: str
+    tenor_days: int
+    settle_date: date
+    forward_rate: float
+
+
+class FXBasisPillarOut(BaseModel):
+    """Cross-currency basis pillar in the persisted FXSummary."""
+
+    model_config = _FROZEN
+
+    tenor_code: str
+    tenor_days: int
+    maturity_date: date
+    spread_bps: float
+    quoted_on_foreign: bool
+
+
+class FXParityCheckRow(BaseModel):
+    """Per-pillar covered-interest-parity check result (M-105)."""
+
+    model_config = _FROZEN
+
+    tenor_code: str
+    settle_date: date
+    quoted_forward: float
+    parity_forward: float
+    diff_bps_of_spot: float
+
+
+class FXConfigSnapshot(BaseModel):
+    """FX pipeline configuration snapshot embedded in every FXSummary."""
+
+    model_config = _FROZEN
+
+    pair_code: str
+    domestic_currency: str
+    foreign_currency: str
+    quote_convention: Literal["direct", "indirect"]
+    spot_lag_days: int
+    settlement_calendars: list[str]
+    forward_point_scale: int
+
+
+class FXSummary(BaseModel):
+    """Top-level persisted FX summary.
+
+    Mirrors :class:`Summary` (V1 OIS) at the FX layer. Fields are in stable
+    order; reordering bumps ``schema_version`` per the same policy.
+    """
+
+    model_config = _FROZEN
+
+    schema_version: int
+    pair_code: str
+    valuation_date: date
+    spot_date: date
+    as_of_timestamp: datetime
+    spot_rate: float
+    forward_pillars: list[FXForwardPillarOut]
+    basis_pillars: list[FXBasisPillarOut]
+    parity_checks: list[FXParityCheckRow]
+    diagnostics: list[DiagnosticOut]
+    config_snapshot: FXConfigSnapshot
+
+    @classmethod
+    def from_domain(
+        cls,
+        *,
+        pair: CurrencyPair,
+        valuation_date: date,
+        forward: FXForwardCurve,
+        basis: CrossCurrencyBasisCurve | None,
+        parity_checks: list[FXParityCheckRow],
+        conv: FXConvention,
+        diagnostics: list[Diagnostic],
+        as_of_timestamp: datetime | None = None,
+    ) -> FXSummary:
+        """Build an FXSummary from domain objects.
+
+        Args:
+            pair:             Currency pair (drives domestic/foreign labels).
+            valuation_date:   As-of date of the snapshot.
+            forward:          Bootstrapped FX forward curve (M-103).
+            basis:            Bootstrapped cross-currency basis curve (M-104),
+                              or ``None`` when no XCCY_BASIS rows were present.
+            parity_checks:    Pillar-level parity check rows (built by the
+                              orchestrator from M-105 diagnostics).
+            conv:             FX convention block for the pair (M-102).
+            diagnostics:      List of domain Diagnostic records (collector
+                              snapshot at write time).
+            as_of_timestamp:  When the snapshot was produced. Defaults to
+                              ``datetime.now(UTC)``.
+
+        Returns:
+            Frozen :class:`FXSummary` instance.
+        """
+        if as_of_timestamp is None:
+            as_of_timestamp = datetime.now(tz=UTC)
+
+        forward_pillars = [
+            FXForwardPillarOut(
+                tenor_code=p.tenor_code,
+                tenor_days=p.tenor_days,
+                settle_date=p.settle_date,
+                forward_rate=p.forward_rate,
+            )
+            for p in forward.pillars_tuple
+        ]
+        basis_pillars = (
+            [
+                FXBasisPillarOut(
+                    tenor_code=p.tenor_code,
+                    tenor_days=p.tenor_days,
+                    maturity_date=p.maturity_date,
+                    spread_bps=p.spread_bps,
+                    quoted_on_foreign=basis.quoted_on_foreign,
+                )
+                for p in basis.pillars_tuple
+            ]
+            if basis is not None
+            else []
+        )
+        diagnostics_out = [
+            DiagnosticOut(
+                severity=d.severity.value,  # "WARN" | "ERROR"
+                code=d.code,
+                message=d.message,
+                context=d.context,
+            )
+            for d in diagnostics
+        ]
+        cfg = FXConfigSnapshot(
+            pair_code=conv.pair_code,
+            domestic_currency=pair.domestic,
+            foreign_currency=pair.foreign,
+            # QuoteConvention is a StrEnum ("direct" | "indirect"); Pydantic
+            # accepts the .value at the field boundary and validates the literal.
+            quote_convention=conv.quote_convention.value,
+            spot_lag_days=conv.spot_lag_days,
+            settlement_calendars=list(conv.settlement_calendars),
+            forward_point_scale=conv.forward_point_scale,
+        )
+
+        return cls(
+            schema_version=FX_SCHEMA_VERSION,
+            pair_code=pair.code,
+            valuation_date=valuation_date,
+            spot_date=forward.spot_date,
+            as_of_timestamp=as_of_timestamp,
+            spot_rate=forward.spot_rate,
+            forward_pillars=forward_pillars,
+            basis_pillars=basis_pillars,
+            parity_checks=parity_checks,
+            diagnostics=diagnostics_out,
+            config_snapshot=cfg,
+        )
+
+
 __all__ = [
+    "FX_SCHEMA_VERSION",
     "SCHEMA_VERSION",
     "ComparisonRowOut",
     "ConfigSnapshot",
     "DiagnosticOut",
+    "FXBasisPillarOut",
+    "FXConfigSnapshot",
+    "FXForwardPillarOut",
+    "FXParityCheckRow",
+    "FXSummary",
     "ForwardRow",
     "PillarOut",
     "Summary",

@@ -13,11 +13,17 @@ import pytest
 from pydantic import ValidationError
 
 from rates.io.schemas import (
+    FX_SCHEMA_VERSION,
     SCHEMA_VERSION,
     ComparisonRowOut,
     ConfigSnapshot,
     DiagnosticOut,
     ForwardRow,
+    FXBasisPillarOut,
+    FXConfigSnapshot,
+    FXForwardPillarOut,
+    FXParityCheckRow,
+    FXSummary,
     PillarOut,
     Summary,
 )
@@ -236,3 +242,102 @@ def test_model_json_schema_has_top_level_fields():
     assert "ConfigSnapshot" in defs
     assert "PillarOut" in defs
     assert "ComparisonRowOut" in defs
+
+
+# ---------------------------------------------------------------------------
+# FX schemas (M-109, v0.3.0)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.phase8
+def test_fx_schema_version_constant() -> None:
+    assert FX_SCHEMA_VERSION == 1
+
+
+@pytest.mark.phase8
+def test_fx_summary_round_trip() -> None:
+    """FXSummary builds, JSON-serializes, and round-trips back to an equal model."""
+    from datetime import date
+
+    summary = FXSummary(
+        schema_version=FX_SCHEMA_VERSION,
+        pair_code="USDTRY",
+        valuation_date=date(2026, 5, 28),
+        spot_date=date(2026, 6, 1),
+        as_of_timestamp=datetime(2026, 5, 28, 16, 30, tzinfo=UTC),
+        spot_rate=32.4520,
+        forward_pillars=[
+            FXForwardPillarOut(
+                tenor_code="1M",
+                tenor_days=30,
+                settle_date=date(2026, 7, 1),
+                forward_rate=32.6355,
+            )
+        ],
+        basis_pillars=[
+            FXBasisPillarOut(
+                tenor_code="1Y",
+                tenor_days=365,
+                maturity_date=date(2027, 6, 1),
+                spread_bps=-180.0,
+                quoted_on_foreign=True,
+            )
+        ],
+        parity_checks=[
+            FXParityCheckRow(
+                tenor_code="1M",
+                settle_date=date(2026, 7, 1),
+                quoted_forward=32.6355,
+                parity_forward=32.6354,
+                diff_bps_of_spot=0.03,
+            )
+        ],
+        diagnostics=[
+            DiagnosticOut(severity="WARN", code="FX_PARITY_MISMATCH", message="x", context={}),
+        ],
+        config_snapshot=FXConfigSnapshot(
+            pair_code="USDTRY",
+            domestic_currency="TRY",
+            foreign_currency="USD",
+            quote_convention="direct",
+            spot_lag_days=2,
+            settlement_calendars=["TR", "US"],
+            forward_point_scale=10000,
+        ),
+    )
+
+    payload = summary.model_dump_json()
+    parsed = FXSummary.model_validate_json(payload)
+    assert parsed == summary
+
+
+@pytest.mark.phase8
+def test_fx_summary_forbids_extra_fields() -> None:
+    """The frozen-extra-forbid invariant holds for FXSummary too."""
+    from datetime import date
+
+    valid_payload = {
+        "schema_version": FX_SCHEMA_VERSION,
+        "pair_code": "USDTRY",
+        "valuation_date": date(2026, 5, 28),
+        "spot_date": date(2026, 6, 1),
+        "as_of_timestamp": datetime(2026, 5, 28, 16, 30, tzinfo=UTC),
+        "spot_rate": 32.4520,
+        "forward_pillars": [],
+        "basis_pillars": [],
+        "parity_checks": [],
+        "diagnostics": [],
+        "config_snapshot": {
+            "pair_code": "USDTRY",
+            "domestic_currency": "TRY",
+            "foreign_currency": "USD",
+            "quote_convention": "direct",
+            "spot_lag_days": 2,
+            "settlement_calendars": ["TR", "US"],
+            "forward_point_scale": 10000,
+        },
+        # unexpected:
+        "rogue_field": "boo",
+    }
+    with pytest.raises(ValidationError):
+        FXSummary.model_validate(valid_payload)
