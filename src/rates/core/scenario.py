@@ -32,6 +32,14 @@ Diagnostics codes:
     SC_INVALID_MPC             (ERROR)  meetings unsorted or duplicated.
     SC_NEGATIVE_POLICY_RATE    (WARN)   band shift produces negative rate.
     SC_MEETING_BEYOND_HORIZON  (WARN)   meeting after horizon end (ignored).
+    SC_MEETING_IN_PAST         (WARN)   meeting on or before val_date (ignored).
+
+V1.5 hardening — SC_MEETING_IN_PAST. Past-dated meetings are *already baked
+into* the initial BISTTREF reading (which is the policy rate observed at
+val_date). Replaying them would double-count the rate move. Behaviour:
+explicit WARN per offending meeting (so the user notices stale input)
++ silent removal from the active path. Not an ERROR: the rest of the
+``mpc_path`` may still drive a meaningful forward index.
 
 Contract: C-003 (consumer-facing).
 """
@@ -45,7 +53,7 @@ from itertools import pairwise
 from rates.core.calendar import HolidayCalendar
 from rates.core.conventions import Conventions
 from rates.core.diagnostics import DiagnosticsCollector
-from rates.core.types import MarketData, MPCPath
+from rates.core.types import MarketData, MPCMeeting, MPCPath
 
 #: Default horizon in calendar years when ``horizon_days`` is None.
 _DEFAULT_HORIZON_YEARS: int = 10
@@ -136,6 +144,38 @@ def _validate_mpc_path(mpc: MPCPath, dg: DiagnosticsCollector) -> None:
             msg = f"MPC meetings must be strictly ascending; got {a} >= {b}"
             dg.error("SC_INVALID_MPC", msg, {"prev": a.isoformat(), "next": b.isoformat()})
             raise InvalidMPCScheduleError(msg)
+
+
+def _filter_past_meetings(
+    mpc: MPCPath, val_date: date, dg: DiagnosticsCollector
+) -> MPCPath:
+    """Drop meetings whose ``meeting_date <= val_date``; emit a WARN per offender.
+
+    The initial BISTTREF rate read from the snapshot already reflects every past
+    policy move. Replaying a past meeting would double-count its bps_change and
+    pull the scenario rate away from the user's stated initial level.
+    """
+    kept: list[MPCMeeting] = []
+    for m in mpc.meetings:
+        if m.meeting_date <= val_date:
+            dg.warn(
+                "SC_MEETING_IN_PAST",
+                (
+                    f"MPC meeting {m.meeting_date.isoformat()} is on or before "
+                    f"valuation_date {val_date.isoformat()}; already reflected in "
+                    "BISTTREF — ignored"
+                ),
+                {
+                    "meeting_date": m.meeting_date.isoformat(),
+                    "valuation_date": val_date.isoformat(),
+                    "bps_change": m.bps_change,
+                },
+            )
+            continue
+        kept.append(m)
+    if len(kept) == len(mpc.meetings):
+        return mpc
+    return MPCPath(meetings=tuple(kept))
 
 
 def _build_bd_grid(
@@ -321,6 +361,7 @@ def build_scenario(
     initial_tlref = market.special_rates[INITIAL_TLREF_KEY]
 
     _validate_mpc_path(mpc_path, diagnostics)
+    mpc_path = _filter_past_meetings(mpc_path, val_date, diagnostics)
 
     horizon = _resolve_horizon(val_date, horizon_days, calendar)
     grid = _build_bd_grid(val_date, horizon, calendar)
