@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rates-engine"
-version = "0.3.0"
-description = "Turkish Lira OIS curve engine — bootstrap, scenario, comparison, FX IO/CLI/app"
+version = "0.4.0"
+description = "Turkish Lira OIS curve engine — bootstrap, scenario, comparison, FX IO/CLI/app, xccy basis stripping"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "Proprietary"}
