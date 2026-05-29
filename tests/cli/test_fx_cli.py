@@ -156,6 +156,60 @@ def test_fx_price_xccy_requires_tenor() -> None:
     assert ns.tenor_code == "1Y"
 
 
+@pytest.mark.phase10
+def test_fx_price_xccy_mtm_parses_flags() -> None:
+    p = _build_parser()
+    # missing required --spread/--notional and the tenor/maturity mutex ⇒ SystemExit
+    with pytest.raises(SystemExit):
+        p.parse_args([
+            "fx", "price-xccy-mtm", "--pair", "USDTRY", "--as-of", "2026-06-12",
+        ])
+    # tenor path (use --flag=-value form for the negative spread)
+    ns = p.parse_args([
+        "fx", "price-xccy-mtm", "--pair", "USDTRY", "--as-of", "2026-06-12",
+        "--spread=-150", "--notional", "1e7", "--tenor", "1Y",
+    ])
+    assert ns.tenor_code == "1Y"
+    assert ns.maturity_date is None
+    assert ns.spread == pytest.approx(-150.0)
+    assert ns.notional == pytest.approx(1e7)
+    assert ns.direction == "receive-domestic"  # default
+    # maturity path + explicit direction
+    ns = p.parse_args([
+        "fx", "price-xccy-mtm", "--pair", "USDTRY", "--as-of", "2026-06-12",
+        "--spread=-180", "--notional", "5e6", "--maturity", "2027-06-15",
+        "--direction", "pay-domestic",
+    ])
+    assert ns.tenor_code is None
+    assert ns.maturity_date == date(2027, 6, 15)
+    assert ns.direction == "pay-domestic"
+    # both --tenor and --maturity ⇒ argparse mutex SystemExit
+    with pytest.raises(SystemExit):
+        p.parse_args([
+            "fx", "price-xccy-mtm", "--pair", "USDTRY", "--as-of", "2026-06-12",
+            "--spread=-150", "--notional", "1e7", "--tenor", "1Y",
+            "--maturity", "2027-06-15",
+        ])
+
+
+@pytest.mark.phase10
+def test_main_dispatches_fx_price_xccy_mtm(monkeypatch) -> None:
+    captured: dict[str, argparse.Namespace] = {}
+
+    def fake(args: argparse.Namespace) -> int:
+        captured["args"] = args
+        return 0
+
+    monkeypatch.setattr(cli_mod, "run_fx_price_xccy_mtm", fake)
+    code = main([
+        "fx", "price-xccy-mtm", "--pair", "USDTRY", "--as-of", "2026-06-12",
+        "--spread=-150", "--notional", "1e7", "--tenor", "1Y",
+    ])
+    assert code == 0
+    assert captured["args"].spread == pytest.approx(-150.0)
+    assert captured["args"].direction == "receive-domestic"
+
+
 @pytest.mark.phase8
 def test_fx_convention_override_collects_pairs() -> None:
     p = _build_parser()

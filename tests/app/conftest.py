@@ -116,3 +116,15 @@ def fx_price_xccy_args(tmp_path) -> argparse.Namespace:
     args = _make_fx_price_args(tmp_path)
     args.tenor_code = "1Y"
     return args
+
+
+@pytest.fixture()
+def fx_price_xccy_mtm_args(tmp_path) -> argparse.Namespace:
+    """`rates fx price-xccy-mtm` Namespace; tenor-keyed by default (MON-022)."""
+    args = _make_fx_price_args(tmp_path)
+    args.tenor_code = "1Y"
+    args.maturity_date = None
+    args.spread = -150.0
+    args.notional = 10_000_000.0
+    args.direction = "receive-domestic"
+    return args
