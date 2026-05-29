@@ -50,12 +50,13 @@ Contract: C-013 (consumer: ``rates.cli``).
 from __future__ import annotations
 
 import argparse
+import math
 import re
 import sys
 from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from rates.core.bootstrap import (
     REPRICE_TOLERANCE,
@@ -80,7 +81,7 @@ from rates.fx.bootstrap_basis import (
     XccyBootstrapError,
     build_cross_basis_curve,
 )
-from rates.fx.bootstrap_forward import build_fx_forward_curve
+from rates.fx.bootstrap_forward import PARITY_MISMATCH_BPS, build_fx_forward_curve
 from rates.fx.conventions import FXConvention, FXConventions
 from rates.fx.forward_curve import FXForwardCurve, FXForwardPillar
 from rates.fx.pricer import (
@@ -88,7 +89,12 @@ from rates.fx.pricer import (
     price_outright_forward,
     price_xccy_basis_swap,
 )
-from rates.fx.types import FX_PARITY_MISMATCH, CurrencyPair
+from rates.fx.types import (
+    FX_PARITY_MISMATCH,
+    FX_PRICE_SCHEMA_TOO_OLD,
+    CrossCurrencyBasisQuote,
+    CurrencyPair,
+)
 from rates.io.fx_market import (
     FxCsvProvider,
     FXCsvSchemaError,
@@ -104,9 +110,12 @@ from rates.io.persistence import (
     write_summary,
 )
 from rates.io.schemas import (
+    FX_SCHEMA_VERSION,
     ConfigSnapshot,
+    FXOisMeta,
     FXParityCheckRow,
     FXSummary,
+    PillarOut,
     Summary,
 )
 
@@ -295,7 +304,7 @@ def run_fx_bootstrap(args: argparse.Namespace) -> int:
         return _print_exit(dg, args)
 
     pair, fx_conv, fx_forward, basis, as_of, dom_curve, for_curve = result
-    parity_checks = _parity_checks_from_diagnostics(dg, fx_forward)
+    parity_checks = _parity_checks_from_diagnostics(dg)
     summary = FXSummary.from_domain(
         pair=pair,
         valuation_date=as_of,
@@ -306,9 +315,10 @@ def run_fx_bootstrap(args: argparse.Namespace) -> int:
         diagnostics=dg.to_list(),
         dom_ois=dom_curve,
         for_ois=for_curve,
-        # Phase 3 placeholder: the strip's reprice assert already pins
-        # |NPV| < 1e-9, so the persisted residual is ~0 by construction. Phase 4
-        # (M-111) wires the real per-pillar values out of the strip.
+        # The strip's reprice assert pins |NPV(b_n*)| < 1e-9, so each persisted
+        # residual is ~0 by construction; the 0.0 default is faithful. Surfacing
+        # the exact per-pillar value would require extending the strip's return
+        # (C-104' freezes it to CrossCurrencyBasisCurve), so it stays a no-op here.
         strip_residuals={},
     )
 
@@ -347,7 +357,7 @@ def run_fx_price_outright(args: argparse.Namespace) -> int:
     ctx = _load_fx_pricing_context(args, dg, require_basis=False)
     if ctx is None:
         return _print_exit(dg, args)
-    pair, _fx_conv, calendars, fx_forward, _basis = ctx
+    pair, _fx_conv, calendars, fx_forward, _basis, _summary = ctx
 
     value_date = _resolve_outright_value_date(args, fx_forward.spot_date, calendars, dg)
     if value_date is None:
@@ -390,7 +400,7 @@ def run_fx_price_swap(args: argparse.Namespace) -> int:
     ctx = _load_fx_pricing_context(args, dg, require_basis=False)
     if ctx is None:
         return _print_exit(dg, args)
-    pair, _fx_conv, calendars, fx_forward, _basis = ctx
+    pair, _fx_conv, calendars, fx_forward, _basis, _summary = ctx
 
     near_date = _resolve_swap_leg_value_date(args, "near", fx_forward.spot_date, calendars, dg)
     far_date = _resolve_swap_leg_value_date(args, "far", fx_forward.spot_date, calendars, dg)
@@ -462,7 +472,7 @@ def run_fx_price_xccy(args: argparse.Namespace) -> int:
     ctx = _load_fx_pricing_context(args, dg, require_basis=True)
     if ctx is None:
         return _print_exit(dg, args)
-    pair, _fx_conv, _calendars, _fx_forward, basis = ctx
+    pair, _fx_conv, _calendars, _fx_forward, basis, summary = ctx
     assert basis is not None  # require_basis=True guarantees this
 
     tenor_code = getattr(args, "tenor_code", None)
@@ -496,9 +506,33 @@ def run_fx_price_xccy(args: argparse.Namespace) -> int:
         )
         return _print_exit(dg, args)
 
-    # dom/for OIS not required by V2 pricer (reserved for V3 calibration);
-    # see _UNUSED_OIS docstring. Pricer never dereferences either argument.
-    spread = price_xccy_basis_swap(basis, _UNUSED_OIS, _UNUSED_OIS, maturity)
+    # C-110: reconstruct the dual OIS curves from the persisted summary and pass
+    # the real curves to the pricer. V0.4's interpolating pricer does not consume
+    # them (OQ-501), but they replace the former typed-None placeholder and keep
+    # the call MtM-ready (A-8). A v1 summary lacks embedded OIS pillars → abort.
+    if summary.schema_version != FX_SCHEMA_VERSION:
+        dg.error(
+            FX_PRICE_SCHEMA_TOO_OLD,
+            (
+                f"persisted FX summary is schema_version {summary.schema_version}; "
+                f"xccy pricing needs v{FX_SCHEMA_VERSION} (embedded OIS pillars). "
+                "Re-run `rates fx bootstrap` to regenerate."
+            ),
+            {"schema_version": summary.schema_version, "required": FX_SCHEMA_VERSION},
+        )
+        return _print_exit(dg, args)
+    try:
+        dom_ois = _dom_ois_from_summary(summary)
+        for_ois = _for_ois_from_summary(summary)
+    except ValueError as e:
+        dg.error(
+            "FX_PRICE_OIS_RECONSTRUCT_FAIL",
+            f"failed to reconstruct OIS curves from persisted summary: {e}",
+            {"pair": pair.code},
+        )
+        return _print_exit(dg, args)
+
+    spread = price_xccy_basis_swap(basis, dom_ois, for_ois, maturity)
 
     if not getattr(args, "quiet", False):
         print(
@@ -538,14 +572,6 @@ def run_forward(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-
-# FX pricer requires dom_ois / for_ois solely to keep the V3 contract surface
-# stable; the V2 body discards them. Persisted FXSummary does not carry OIS
-# pillars (schema bump deferred to V3 calibration work), so pricing call sites
-# pass this typed-but-runtime-None placeholder. mypy stays quiet via the cast;
-# the pricer never dereferences either argument.
-_UNUSED_OIS: OISCurve = cast(OISCurve, None)
 
 
 def _build_config_snapshot(
@@ -595,6 +621,59 @@ def _curve_from_summary(summary: Summary) -> OISCurve:
         pillars_tuple=pillars,
         forward_ladder_dates=ladder,
     )
+
+
+def _ois_from_summary_pillars(pillars: list[PillarOut], meta: FXOisMeta) -> OISCurve:
+    """Reconstruct an :class:`OISCurve` from persisted OIS pillars + meta (C-110).
+
+    Mirrors :func:`_curve_from_summary` for the FX layer: ``PillarOut`` carries no
+    ``start_date`` (constant per G10), so each pillar's ``start_date`` is set to
+    ``meta.valuation_date``. ``forward_ladder_dates`` is reconstructed empty —
+    the FX pricing path only calls ``df_at`` and never the forward ladder, and
+    :meth:`OISCurve.__post_init__` imposes no ladder invariant (OQ-502).
+
+    Raises:
+        ValueError: When ``meta.interpolation`` is not a known scheme (mirrors
+            :func:`_curve_from_summary`).
+    """
+    interp = meta.interpolation
+    if interp not in ("log_linear_df", "linear_zero"):
+        raise ValueError(
+            f"FXSummary OIS meta has unknown interpolation scheme: {interp!r}"
+        )
+    val = meta.valuation_date
+    pillars_tuple = tuple(
+        Pillar(
+            tenor_code=p.tenor_code,
+            tenor_days=p.tenor_days,
+            start_date=val,
+            end_date=p.end_date,
+            rate=p.rate,
+            discount_factor=p.discount_factor,
+        )
+        for p in pillars
+    )
+    return OISCurve(
+        valuation_date=val,
+        day_count=DayCount(meta.day_count),
+        interp=interp,  # type: ignore[arg-type]
+        pillars_tuple=pillars_tuple,
+        forward_ladder_dates=(),
+    )
+
+
+def _dom_ois_from_summary(summary: FXSummary) -> OISCurve:
+    """Reconstruct the domestic OIS curve from an FXSummary v2 (C-110).
+
+    Callers must verify ``summary.schema_version == FX_SCHEMA_VERSION`` first
+    (a v1 summary lacks ``dom_ois_pillars`` — emit ``FX_PRICE_SCHEMA_TOO_OLD``).
+    """
+    return _ois_from_summary_pillars(summary.dom_ois_pillars, summary.dom_ois_meta)
+
+
+def _for_ois_from_summary(summary: FXSummary) -> OISCurve:
+    """Reconstruct the foreign OIS curve from an FXSummary v2 (C-110)."""
+    return _ois_from_summary_pillars(summary.for_ois_pillars, summary.for_ois_meta)
 
 
 # ---------------------------------------------------------------------------
@@ -748,6 +827,12 @@ def _run_fx_pipeline(
             )
             return None
 
+    if basis is not None:
+        # A-6 / OQ-503: the basis-aware FX_PARITY_MISMATCH gate runs here, once
+        # both the forward curve and the stripped basis exist. M-105 no longer
+        # emits the old pure-CIP WARN (no double-reporting).
+        _warn_basis_parity_mismatches(basis, fx_market.basis_quotes, dg)
+
     return pair, fx_conv, fx_forward, basis, as_of, dom_curve, for_curve
 
 
@@ -756,41 +841,89 @@ def _fx_summary_filename(pair: CurrencyPair) -> str:
     return f"{pair.code.lower()}_fx_summary.json"
 
 
+def _warn_basis_parity_mismatches(
+    basis: CrossCurrencyBasisCurve,
+    quotes: tuple[CrossCurrencyBasisQuote, ...],
+    dg: DiagnosticsCollector,
+) -> None:
+    """Basis-aware ``FX_PARITY_MISMATCH`` gate (A-6 / OQ-503, §7).
+
+    Reconciles the two market sources once both the forward curve and the
+    stripped basis exist: for each calibrated pillar it compares the
+    **forward-implied** basis ``b_n`` (the spread the strip derived from the FX
+    forwards, §5.4) against the **quoted** XCCY_BASIS spread at the same tenor,
+    and emits one WARN per pillar whose ``|b_n - quoted|`` exceeds
+    :data:`PARITY_MISMATCH_BPS` (1.0 bps). The comparison is in bps directly
+    (not bps-of-spot): both sides are basis spreads.
+
+    This is **not** a forward-vs-(CIP+stripped) check — that would be vacuous,
+    since the stripped basis is *defined* from the forwards. Pillars are matched
+    to quotes by ``tenor_code`` (the strip seeds the pillar grid from the quote
+    tenors, so they align); a quote with no surviving pillar (skipped as
+    non-finite/duplicate) is simply never looked up.
+    """
+    quoted_by_tenor: dict[str, float] = {q.tenor_code: q.spread_bps for q in quotes}
+    for p in basis.pillars_tuple:
+        quoted = quoted_by_tenor.get(p.tenor_code)
+        if quoted is None or not math.isfinite(quoted):
+            continue
+        diff = p.spread_bps - quoted
+        if abs(diff) > PARITY_MISMATCH_BPS:
+            dg.warn(
+                FX_PARITY_MISMATCH,
+                (
+                    f"{p.tenor_code}: forward-implied basis {p.spread_bps:+.2f} bps "
+                    f"vs quoted {quoted:+.2f} bps (diff {diff:+.2f} bps)"
+                ),
+                {
+                    "tenor_code": p.tenor_code,
+                    "settle_date": p.maturity_date.isoformat(),
+                    "quoted_bps": quoted,
+                    "forward_implied_bps": p.spread_bps,
+                    "diff_bps": diff,
+                },
+            )
+
+
 def _parity_checks_from_diagnostics(
     dg: DiagnosticsCollector,
-    forward: FXForwardCurve,
 ) -> list[FXParityCheckRow]:
-    """Project ``FX_PARITY_MISMATCH`` WARN diagnostics into FXParityCheckRow rows.
+    """Project basis-aware ``FX_PARITY_MISMATCH`` WARNs into FXParityCheckRow rows.
 
-    M-105 emits one WARN per offending pillar with structured context::
+    The relocated gate (:func:`_warn_basis_parity_mismatches`) emits one WARN per
+    basis pillar with context ``{tenor_code, settle_date, quoted_bps,
+    forward_implied_bps, diff_bps}``.
 
-        {tenor_code, quoted, parity, diff_bps_of_spot}
+    The persisted :class:`FXParityCheckRow` (v2, frozen in Phase 3) keeps its
+    forward-named float columns; rather than bump the schema, they are reused and
+    **reinterpreted** for the basis-aware reconciliation (decision: keep columns,
+    document the meaning):
 
-    We pick up ``settle_date`` from the forward curve's pillar table by
-    matching ``tenor_code`` (M-105 enforces unique tenor_codes per pillar).
-    Rows whose tenor_code is no longer present on the curve are silently
-    skipped — that would indicate a bootstrap-side bug we want surfaced via
-    other diagnostics, not crashed on here.
+    * ``quoted_forward``    → quoted XCCY_BASIS spread (bps)
+    * ``parity_forward``    → forward-implied basis ``b_n`` (bps)
+    * ``diff_bps_of_spot``  → ``b_n - quoted`` (bps)
+
+    ``settle_date`` is the basis pillar maturity, carried in the WARN context.
+    The authoritative human-readable record remains the WARN in
+    ``summary.diagnostics``; this is its typed projection.
     """
-    settle_by_tenor: dict[str, date] = {
-        p.tenor_code: p.settle_date for p in forward.pillars_tuple
-    }
     rows: list[FXParityCheckRow] = []
     for d in dg.to_list():
         if d.code != FX_PARITY_MISMATCH:
             continue
         ctx = d.context
         tenor_code = ctx.get("tenor_code")
-        if not isinstance(tenor_code, str) or tenor_code not in settle_by_tenor:
+        settle_raw = ctx.get("settle_date")
+        if not isinstance(tenor_code, str) or not isinstance(settle_raw, str):
             continue
         try:
             rows.append(
                 FXParityCheckRow(
                     tenor_code=tenor_code,
-                    settle_date=settle_by_tenor[tenor_code],
-                    quoted_forward=float(ctx["quoted"]),
-                    parity_forward=float(ctx["parity"]),
-                    diff_bps_of_spot=float(ctx["diff_bps_of_spot"]),
+                    settle_date=date.fromisoformat(settle_raw),
+                    quoted_forward=float(ctx["quoted_bps"]),
+                    parity_forward=float(ctx["forward_implied_bps"]),
+                    diff_bps_of_spot=float(ctx["diff_bps"]),
                 )
             )
         except (KeyError, TypeError, ValueError):
@@ -860,6 +993,7 @@ def _load_fx_pricing_context(
         tuple[HolidayCalendar, ...],
         FXForwardCurve,
         CrossCurrencyBasisCurve | None,
+        FXSummary,
     ]
     | None
 ):
@@ -875,8 +1009,10 @@ def _load_fx_pricing_context(
                         the persisted summary contains no basis pillars.
 
     Returns:
-        ``(pair, fx_convention, joint_calendars, fx_forward_curve, basis_or_None)``
-        on success; ``None`` on any failure.
+        ``(pair, fx_convention, joint_calendars, fx_forward_curve, basis_or_None,
+        summary)`` on success; ``None`` on any failure. The raw ``summary`` is
+        surfaced so the xccy verb can check ``schema_version`` and reconstruct
+        the dual OIS curves (C-110).
     """
     try:
         conv = Conventions.load(
@@ -958,7 +1094,7 @@ def _load_fx_pricing_context(
         )
         return None
 
-    return pair, fx_conv, calendars, fx_forward, basis
+    return pair, fx_conv, calendars, fx_forward, basis, summary
 
 
 def _resolve_tenor_to_value_date(
