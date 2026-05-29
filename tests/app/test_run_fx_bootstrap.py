@@ -16,24 +16,24 @@ import pyarrow.parquet as pq
 import pytest
 
 from rates.app import run_fx_bootstrap
-from rates.io.schemas import FXSummary
+from rates.io.schemas import FX_SCHEMA_VERSION, FXSummary
 
 
 @pytest.mark.phase8
 def test_run_fx_bootstrap_writes_summary_and_partitions(
     fx_bootstrap_args, tmp_path,
 ) -> None:
-    """Happy path: WARN-only exit 0 + summary JSON + both Parquet partitions."""
+    """Happy path: clean exit 0 + summary JSON (v2) + both Parquet partitions."""
     code = run_fx_bootstrap(fx_bootstrap_args)
     assert code == 0
 
     summary_path = tmp_path / "data" / "latest" / "usdtry_fx_summary.json"
     assert summary_path.exists()
     summary = FXSummary.model_validate_json(summary_path.read_text(encoding="utf-8"))
-    assert summary.schema_version == 1
+    assert summary.schema_version == FX_SCHEMA_VERSION  # v2 (M-109)
     assert summary.pair_code == "USDTRY"
     assert summary.valuation_date == date(2026, 6, 12)
-    assert len(summary.forward_pillars) == 2  # 1M, 3M in fixture
+    assert len(summary.forward_pillars) == 5  # 1M,3M,6M,9M,12M in V0.4 fixture
     assert len(summary.basis_pillars) == 1  # 1Y XCCY_BASIS in fixture
     assert summary.basis_pillars[0].quoted_on_foreign is True
 
@@ -56,27 +56,20 @@ def test_run_fx_bootstrap_writes_summary_and_partitions(
 
 
 @pytest.mark.phase8
-def test_run_fx_bootstrap_populates_parity_checks(fx_bootstrap_args, tmp_path) -> None:
-    """The fixture's TRY OIS @ ~42% vs USD OIS @ ~5% guarantees parity WARNs;
-    those WARNs MUST surface as FXParityCheckRow entries in the persisted summary."""
+def test_run_fx_bootstrap_arbitrage_consistent_fixture_has_no_parity_checks(
+    fx_bootstrap_args, tmp_path,
+) -> None:
+    """V0.4 (A-6): the fixture's forwards EMBED the -180 bps basis, so the
+    basis-aware gate finds forward-implied ≈ quoted and emits zero
+    FX_PARITY_MISMATCH — hence ``parity_checks`` is empty. This is the A-1
+    deliverable: the gate passes *meaningfully*, not vacuously. (The WARN path
+    itself is unit-tested in tests/app/test_fx_parity_gate.py.)"""
     assert run_fx_bootstrap(fx_bootstrap_args) == 0
     summary_path = tmp_path / "data" / "latest" / "usdtry_fx_summary.json"
     summary = FXSummary.model_validate_json(summary_path.read_text(encoding="utf-8"))
-    # Both 1M and 3M pillars should show parity mismatch given the wildly
-    # different domestic and foreign OIS levels in the fixtures.
-    assert len(summary.parity_checks) >= 1
-    seen_tenors = {row.tenor_code for row in summary.parity_checks}
-    assert seen_tenors.issubset({"1M", "3M"})
-    for row in summary.parity_checks:
-        # Quoted forward and parity forward must both be finite and positive
-        # (USDTRY direct quote).
-        assert row.quoted_forward > 0
-        assert row.parity_forward > 0
-        # The parity column should track the FXForwardPillarOut entry by tenor.
-        match = next(
-            p for p in summary.forward_pillars if p.tenor_code == row.tenor_code
-        )
-        assert row.settle_date == match.settle_date
+    assert summary.parity_checks == []
+    # And the stripped basis recovers the embedded -180 bps target.
+    assert summary.basis_pillars[0].spread_bps == pytest.approx(-180.0, abs=0.5)
 
 
 @pytest.mark.phase8
@@ -126,11 +119,11 @@ def test_run_fx_bootstrap_rerun_overwrites(fx_bootstrap_args, tmp_path) -> None:
 
 @pytest.mark.phase8
 def test_run_fx_bootstrap_diagnostics_persisted(fx_bootstrap_args, tmp_path) -> None:
-    """summary.diagnostics is a list; parity WARNs land here too."""
+    """summary.diagnostics is a list and the arbitrage-consistent V0.4 fixture
+    persists a clean envelope: no ERROR rows and no FX_PARITY_MISMATCH (A-6)."""
     assert run_fx_bootstrap(fx_bootstrap_args) == 0
     summary_path = tmp_path / "data" / "latest" / "usdtry_fx_summary.json"
     summary = FXSummary.model_validate_json(summary_path.read_text(encoding="utf-8"))
-    parity_codes = [d for d in summary.diagnostics if d.code == "FX_PARITY_MISMATCH"]
-    assert parity_codes, "expected parity WARNs in summary.diagnostics"
-    for d in parity_codes:
-        assert d.severity == "WARN"
+    assert isinstance(summary.diagnostics, list)
+    assert [d for d in summary.diagnostics if d.code == "FX_PARITY_MISMATCH"] == []
+    assert [d for d in summary.diagnostics if d.severity == "ERROR"] == []
