@@ -88,12 +88,14 @@ from rates.fx.pricer import (
     price_fx_swap,
     price_outright_forward,
     price_xccy_basis_swap,
+    price_xccy_swap_mtm,
 )
 from rates.fx.types import (
     FX_PARITY_MISMATCH,
     FX_PRICE_SCHEMA_TOO_OLD,
     CrossCurrencyBasisQuote,
     CurrencyPair,
+    XccySwapDirection,
 )
 from rates.io.fx_market import (
     FxCsvProvider,
@@ -538,6 +540,114 @@ def run_fx_price_xccy(args: argparse.Namespace) -> int:
         print(
             f"xccy_basis({pair.code} {tenor_code}) = {spread:+.4f} bps "
             f"(maturity {maturity.isoformat()})"
+        )
+    return _print_exit(dg, args)
+
+
+def run_fx_price_xccy_mtm(args: argparse.Namespace) -> int:
+    """Mark-to-market price a cross-currency basis swap (MON-022, C-111).
+
+    Reconstructs the dual OIS curves + FX forward curve from the persisted
+    FXSummary v2 and prices a spot-starting, constant-notional xccy basis swap at
+    a flat **contract** spread (which generally differs from the fair stripped
+    basis), returning the PV in domestic units (as of spot). The maturity is
+    given by ``--tenor`` (resolved against the persisted basis pillars) **or**
+    ``--maturity`` (explicit date); ``--spread`` / ``--notional`` / ``--direction``
+    carry the contract terms.
+
+    Requires a basis-bearing v2 summary (A-609): ``quoted_on_foreign`` is read
+    from the persisted basis pillars. Stdout format::
+
+        mtm_xccy(<pair> <tenor|date>, spread=<bps:+.2f> bps, N=<notional:,.0f>) PV = <pv:,.2f> <DOM>
+
+    Args:
+        args: Namespace — shared FX pricing fields plus ``spread`` (float, bps),
+              ``notional`` (float, domestic), ``direction`` (str), and exactly
+              one of ``tenor_code`` / ``maturity_date``.
+
+    Returns:
+        Unix exit code — 0 on success, 2 on any ERROR.
+    """
+    dg = DiagnosticsCollector()
+    ctx = _load_fx_pricing_context(args, dg, require_basis=True)
+    if ctx is None:
+        return _print_exit(dg, args)
+    pair, _fx_conv, calendars, fx_forward, basis, summary = ctx
+    assert basis is not None  # require_basis=True guarantees this
+
+    maturity = _resolve_xccy_mtm_maturity(args, basis, dg)
+    if maturity is None:
+        return _print_exit(dg, args)
+
+    if maturity <= fx_forward.spot_date:
+        dg.error(
+            "FX_PRICE_VALUE_DATE_BEFORE_SPOT",
+            f"maturity {maturity} must be strictly after spot {fx_forward.spot_date}",
+            {"maturity": maturity.isoformat(), "spot": fx_forward.spot_date.isoformat()},
+        )
+        return _print_exit(dg, args)
+
+    notional = float(args.notional)
+    if notional < 0.0:
+        dg.error(
+            "FX_PRICE_INVALID_NOTIONAL",
+            f"--notional must be >= 0 (got {notional}); use --direction for the side",
+            {"notional": notional},
+        )
+        return _print_exit(dg, args)
+    spread = float(args.spread)
+    direction = XccySwapDirection(args.direction)
+
+    # C-110: a v1 summary lacks embedded OIS pillars → abort.
+    if summary.schema_version != FX_SCHEMA_VERSION:
+        dg.error(
+            FX_PRICE_SCHEMA_TOO_OLD,
+            (
+                f"persisted FX summary is schema_version {summary.schema_version}; "
+                f"xccy MtM pricing needs v{FX_SCHEMA_VERSION} (embedded OIS pillars). "
+                "Re-run `rates fx bootstrap` to regenerate."
+            ),
+            {"schema_version": summary.schema_version, "required": FX_SCHEMA_VERSION},
+        )
+        return _print_exit(dg, args)
+    try:
+        dom_ois = _dom_ois_from_summary(summary)
+        for_ois = _for_ois_from_summary(summary)
+    except ValueError as e:
+        dg.error(
+            "FX_PRICE_OIS_RECONSTRUCT_FAIL",
+            f"failed to reconstruct OIS curves from persisted summary: {e}",
+            {"pair": pair.code},
+        )
+        return _print_exit(dg, args)
+
+    dom_cal, for_cal = calendars
+    try:
+        pv = price_xccy_swap_mtm(
+            dom_ois,
+            for_ois,
+            fx_forward,
+            maturity_date=maturity,
+            contract_spread_bps=spread,
+            notional_domestic=notional,
+            quoted_on_foreign=basis.quoted_on_foreign,
+            direction=direction,
+            dom_calendar=dom_cal,
+            for_calendar=for_cal,
+            diagnostics=dg,
+        )
+    except ValueError as e:
+        # The pricer emits its own specific ERROR (e.g. FX_XCCY_FORWARD_COVERAGE)
+        # before raising; add a fallback only if nothing was recorded.
+        if not dg.has_errors():
+            dg.error("FX_PRICE_MTM_FAIL", f"MtM pricing failed: {e}", {"pair": pair.code})
+        return _print_exit(dg, args)
+
+    label = getattr(args, "tenor_code", None) or maturity.isoformat()
+    if not getattr(args, "quiet", False):
+        print(
+            f"mtm_xccy({pair.code} {label}, spread={spread:+.2f} bps, "
+            f"N={notional:,.0f}) PV = {pv:,.2f} {pair.domestic}"
         )
     return _print_exit(dg, args)
 
@@ -1097,6 +1207,53 @@ def _load_fx_pricing_context(
     return pair, fx_conv, calendars, fx_forward, basis, summary
 
 
+def _resolve_xccy_mtm_maturity(
+    args: argparse.Namespace,
+    basis: CrossCurrencyBasisCurve,
+    dg: DiagnosticsCollector,
+) -> date | None:
+    """Resolve the MtM swap maturity from ``--tenor`` (basis pillar) xor ``--maturity``.
+
+    Exactly one must be set (argparse enforces the mutex; re-checked defensively).
+    ``--tenor`` is looked up in the persisted basis pillars (so it carries the
+    market-convention maturity date, as in :func:`run_fx_price_xccy`);
+    ``--maturity`` is taken verbatim (the schedule's back stub ends on it exactly,
+    so it need not be a roll date).
+    """
+    tenor_code = getattr(args, "tenor_code", None)
+    maturity_arg = getattr(args, "maturity_date", None)
+    if (tenor_code is None) == (maturity_arg is None):
+        dg.error(
+            "FX_PRICE_TENOR_VALUE_DATE_MUTEX",
+            (
+                "exactly one of --tenor / --maturity is required "
+                f"(got tenor={tenor_code!r}, maturity={maturity_arg!r})"
+            ),
+            {"tenor_code": repr(tenor_code), "maturity": repr(maturity_arg)},
+        )
+        return None
+    if maturity_arg is not None:
+        assert isinstance(maturity_arg, date)
+        return maturity_arg
+    maturity = next(
+        (p.maturity_date for p in basis.pillars_tuple if p.tenor_code == tenor_code),
+        None,
+    )
+    if maturity is None:
+        dg.error(
+            "FX_PRICE_UNKNOWN_TENOR",
+            (
+                f"tenor {tenor_code!r} not in persisted basis pillars; available: "
+                f"{[p.tenor_code for p in basis.pillars_tuple]}"
+            ),
+            {
+                "tenor_code": tenor_code,
+                "available": [p.tenor_code for p in basis.pillars_tuple],
+            },
+        )
+    return maturity
+
+
 def _resolve_tenor_to_value_date(
     tenor_code: str,
     spot_date: date,
@@ -1384,4 +1541,5 @@ __all__ = [
     "run_fx_price_outright",
     "run_fx_price_swap",
     "run_fx_price_xccy",
+    "run_fx_price_xccy_mtm",
 ]

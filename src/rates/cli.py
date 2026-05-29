@@ -25,6 +25,9 @@ The shared FX shape ``--pair / --as-of / --conventions-yaml / --output-root
                             (--near-tenor TENOR | --near-value-date YYYY-MM-DD)
                             (--far-tenor TENOR  | --far-value-date YYYY-MM-DD)
     rates fx price-xccy     --pair PAIR --as-of YYYY-MM-DD --tenor TENOR
+    rates fx price-xccy-mtm --pair PAIR --as-of YYYY-MM-DD --spread BPS
+                            --notional N [--direction receive-domestic|pay-domestic]
+                            (--tenor TENOR | --maturity YYYY-MM-DD)
 
 Stdlib argparse — no extra dependency. Entry point declared in pyproject.toml:
 ``rates = "rates.cli:main"``.
@@ -48,6 +51,7 @@ from rates.app import (
     run_fx_price_outright,
     run_fx_price_swap,
     run_fx_price_xccy,
+    run_fx_price_xccy_mtm,
 )
 
 _DEFAULT_SNAPSHOT_DIR: Path = Path("data/snapshots")
@@ -126,6 +130,7 @@ def _add_fx_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     _add_fx_price_outright_parser(fx_sub)
     _add_fx_price_swap_parser(fx_sub)
     _add_fx_price_xccy_parser(fx_sub)
+    _add_fx_price_xccy_mtm_parser(fx_sub)
 
 
 def _add_fx_shared(p: argparse.ArgumentParser, *, persistence: bool) -> None:
@@ -217,6 +222,35 @@ def _add_fx_price_xccy_parser(sub: argparse._SubParsersAction[argparse.ArgumentP
     p.set_defaults(func=_fx_price_xccy_command)
 
 
+def _add_fx_price_xccy_mtm_parser(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    p = sub.add_parser(
+        "price-xccy-mtm",
+        help="Mark-to-market PV of a cross-currency basis swap at an off-market spread.",
+    )
+    _add_fx_shared(p, persistence=True)
+    p.add_argument("--spread", type=float, required=True, help="Contract basis spread (bps).")
+    p.add_argument(
+        "--notional",
+        type=float,
+        required=True,
+        help="Domestic notional (>= 0; use --direction for the side).",
+    )
+    p.add_argument(
+        "--direction",
+        choices=["receive-domestic", "pay-domestic"],
+        default="receive-domestic",
+        help="Which side the PV is reported for (default: receive-domestic).",
+    )
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument("--tenor", dest="tenor_code", default=None)
+    group.add_argument(
+        "--maturity", dest="maturity_date", type=date.fromisoformat, default=None
+    )
+    p.set_defaults(func=_fx_price_xccy_mtm_command)
+
+
 # ---------------------------------------------------------------------------
 # Subcommand bodies (<30 LoC each per F-009)
 # ---------------------------------------------------------------------------
@@ -261,6 +295,10 @@ def _fx_price_swap_command(args: argparse.Namespace) -> int:
 
 def _fx_price_xccy_command(args: argparse.Namespace) -> int:
     return run_fx_price_xccy(args)
+
+
+def _fx_price_xccy_mtm_command(args: argparse.Namespace) -> int:
+    return run_fx_price_xccy_mtm(args)
 
 
 # ---------------------------------------------------------------------------

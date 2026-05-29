@@ -18,10 +18,13 @@ from __future__ import annotations
 
 from datetime import date
 
+from rates.core.calendar import HolidayCalendar
 from rates.core.curve import OISCurve
+from rates.core.diagnostics import DiagnosticsCollector
 from rates.fx.basis_curve import CrossCurrencyBasisCurve
 from rates.fx.forward_curve import FXForwardCurve
-from rates.fx.types import FXSwapPricing
+from rates.fx.types import FX_XCCY_FORWARD_COVERAGE, FXSwapPricing, XccySwapDirection
+from rates.fx.xccy_pv import build_xccy_leg_terms, forward_covers, net_pv
 
 
 def price_outright_forward(
@@ -136,8 +139,117 @@ def price_xccy_basis_swap(
     return basis.basis_at(maturity_date)
 
 
+def price_xccy_swap_mtm(
+    dom_ois: OISCurve,
+    for_ois: OISCurve,
+    fx_forward: FXForwardCurve,
+    *,
+    maturity_date: date,
+    contract_spread_bps: float,
+    notional_domestic: float,
+    quoted_on_foreign: bool,
+    direction: XccySwapDirection,
+    dom_calendar: HolidayCalendar,
+    for_calendar: HolidayCalendar,
+    diagnostics: DiagnosticsCollector,
+) -> float:
+    """Mark-to-market PV of a spot-starting xccy basis swap (C-111, V0.5).
+
+    Reprices a constant-notional, float-float cross-currency basis swap that
+    **starts at the curve spot date** (``fx_forward.spot_date``) and matures at
+    ``maturity_date``, carrying a single **flat** contract basis spread that
+    generally differs from the fair stripped basis. The foreign leg is converted
+    to domestic units at the full FX forward curve and discounted on the domestic
+    OIS curve, anchored at spot (Method (i); D-601/D-605/D-607). The returned PV
+    is in **domestic units, as of the spot date**.
+
+    Unlike :func:`price_xccy_basis_swap` (C-108, the fair *marginal* basis
+    interpolator), this is a true PV: a contract priced at the swap's par flat
+    spread reprices to ``PV ≈ 0``; an off-market spread gives a non-zero PV that
+    scales linearly with notional and flips sign with ``direction``. Closed form
+    (RECEIVE_DOMESTIC base, foreign-quoted): ``PV = N_for*(s_par_flat -
+    contract_spread)*A_for/1e4``; the shared kernel :func:`rates.fx.xccy_pv.net_pv`
+    is authoritative for the exact sign under each
+    (``quoted_on_foreign``, ``direction``) pair. The stored
+    :class:`CrossCurrencyBasisCurve` is **not** consumed — PV comes from
+    cashflows + curves directly.
+
+    Args:
+        dom_ois:             Domestic OIS curve (projection + discount).
+        for_ois:             Foreign OIS curve (projection + discount).
+        fx_forward:          FX forward curve; supplies the spot date/rate and the
+                             coupon-date forwards. Must reach ``maturity_date``.
+        maturity_date:       Final settlement; must be strictly after the spot date.
+        contract_spread_bps: The swap's flat contract basis spread, in bps.
+        notional_domestic:   Domestic notional ``N_dom`` (``N_for = N_dom/S``);
+                             must be ``>= 0`` — use ``direction`` for the side.
+        quoted_on_foreign:   True iff the spread sits on the foreign leg.
+        direction:           Which side the PV is reported for (sign).
+        dom_calendar:        Domestic holiday calendar (joint roll).
+        for_calendar:        Foreign holiday calendar (joint roll).
+        diagnostics:         Collector — receives ``FX_XCCY_FORWARD_COVERAGE`` on
+                             a short forward curve.
+
+    Returns:
+        PV in domestic units, as of the spot date.
+
+    Raises:
+        ValueError: ``notional_domestic < 0``; ``maturity_date <= spot_date``; or
+            the FX forward curve does not reach ``maturity_date`` (after emitting
+            ``FX_XCCY_FORWARD_COVERAGE`` — no silent extrapolation, A-608).
+    """
+    if notional_domestic < 0.0:
+        raise ValueError(
+            f"notional_domestic must be >= 0 (got {notional_domestic}); "
+            "use direction for the side of the swap"
+        )
+    spot_date = fx_forward.spot_date
+    spot_rate = fx_forward.spot_rate
+    if maturity_date <= spot_date:
+        raise ValueError(
+            f"maturity_date ({maturity_date.isoformat()}) must be after the spot "
+            f"date ({spot_date.isoformat()})"
+        )
+    if not forward_covers(maturity_date, fx_forward):
+        last = fx_forward.pillars_tuple[-1].settle_date
+        msg = (
+            f"FX forward curve last pillar {last.isoformat()} precedes the xccy "
+            f"swap maturity {maturity_date.isoformat()}; refusing to extrapolate"
+        )
+        diagnostics.error(
+            FX_XCCY_FORWARD_COVERAGE,
+            msg,
+            {
+                "maturity": maturity_date.isoformat(),
+                "last_forward_settle": last.isoformat(),
+            },
+        )
+        raise ValueError(msg)
+
+    _schedule, terms, pv_for0 = build_xccy_leg_terms(
+        spot_date,
+        maturity_date,
+        dom_ois,
+        for_ois,
+        fx_forward,
+        spot_rate,
+        dom_calendar,
+        for_calendar,
+    )
+    npv_unit = net_pv(
+        terms,
+        pv_for0,
+        spot_rate,
+        quoted_on_foreign=quoted_on_foreign,
+        spread_bps_per_coupon=[contract_spread_bps] * len(terms),
+    )
+    sign = 1.0 if direction is XccySwapDirection.RECEIVE_DOMESTIC else -1.0
+    return sign * notional_domestic * npv_unit
+
+
 __all__ = [
     "price_fx_swap",
     "price_outright_forward",
     "price_xccy_basis_swap",
+    "price_xccy_swap_mtm",
 ]

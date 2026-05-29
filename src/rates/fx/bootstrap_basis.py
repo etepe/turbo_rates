@@ -44,11 +44,9 @@ from scipy.optimize import brentq
 from rates.core.calendar import HolidayCalendar
 from rates.core.curve import OISCurve
 from rates.core.diagnostics import DiagnosticsCollector
-from rates.core.types import BusinessDayConvention, DayCount
 from rates.fx.basis_curve import BasisPillar, CrossCurrencyBasisCurve
 from rates.fx.conventions import FXConvention
 from rates.fx.forward_curve import FXForwardCurve
-from rates.fx.schedule import build_quarterly_xccy_schedule
 from rates.fx.types import (
     FX_BASIS_INVERTED,
     FX_BOOTSTRAP_NON_CONVERGENT,
@@ -58,12 +56,8 @@ from rates.fx.types import (
     CrossCurrencyBasisQuote,
     FXMarketData,
 )
+from rates.fx.xccy_pv import XccyCouponTerm, build_xccy_leg_terms, net_pv
 
-# D-14: common day-count + roll for the quarterly xccy schedule (both legs).
-_STRIP_DAY_COUNT = DayCount.ACT_360
-_STRIP_BDC = BusinessDayConvention.MODIFIED_FOLLOWING
-
-_BPS_PER_UNIT = 10000.0
 _BRACKET_BPS = 10000.0  # D-13: ±10000 bps brentq bracket.
 _REPRICE_TOL_NPV = 1e-9  # D-13: matches FX_FORWARD_REPRICE_TOLERANCE.
 # Below this |spread| (bps) a stripped pillar is numerically zero: the brentq
@@ -91,16 +85,6 @@ class _GridPillar:
     tenor_code: str
     tenor_days: int
     maturity_date: date
-
-
-@dataclass(frozen=True, slots=True)
-class _CouponTerm:
-    """Pre-computed per-coupon quantities for one pillar's swap schedule."""
-
-    tau: float          # Act/360 accrual for this period
-    df_dom: float       # domestic OIS discount factor at the coupon date
-    fwd: float          # FX outright forward F(t_i) at the coupon date
-    bucket: int         # 1-based piecewise-flat basis bucket index
 
 
 def build_cross_basis_curve(
@@ -163,7 +147,7 @@ def build_cross_basis_curve(
     pillars: list[BasisPillar] = []
     solved_bps: list[float] = []
     for n, g in enumerate(grid, start=1):
-        terms, pv_for0 = _coupon_terms(
+        schedule, terms, pv_for0 = build_xccy_leg_terms(
             spot_date,
             g.maturity_date,
             dom_ois,
@@ -172,11 +156,15 @@ def build_cross_basis_curve(
             spot_rate,
             dom_calendar,
             for_calendar,
-            grid_maturities,
         )
+        # 1-based piecewise-flat basis bucket per coupon (was the _CouponTerm
+        # ``bucket`` field; now strip-local since the shared kernel is bucket-
+        # agnostic — it takes an explicit per-coupon spread vector, C-112).
+        buckets = [bisect_left(grid_maturities, c) + 1 for c in schedule.coupon_dates]
         b_n_bps = _solve_pillar(
             n=n,
             terms=terms,
+            buckets=buckets,
             pv_for0=pv_for0,
             spot_rate=spot_rate,
             quoted_on_foreign=quoted_on_foreign,
@@ -209,95 +197,11 @@ def build_cross_basis_curve(
 # ---------------------------------------------------------------------------
 
 
-def _coupon_terms(
-    spot_date: date,
-    maturity: date,
-    dom_ois: OISCurve,
-    for_ois: OISCurve,
-    fx_forward: FXForwardCurve,
-    spot_rate: float,
-    dom_calendar: HolidayCalendar,
-    for_calendar: HolidayCalendar,
-    grid_maturities: list[date],
-) -> tuple[list[_CouponTerm], float]:
-    """Per-coupon terms + the spread-free foreign PV in domestic units (§5.2).
-
-    Domestic discounting is anchored at the spot date so ``DF_dom(t_0) = 1``
-    (§5.2): the strip discount factor is ``DF_dom(t_i)/DF_dom(spot)``. The
-    notional exchange at ``t_0`` therefore contributes exactly ``-S`` (it settles
-    at the discount anchor). The foreign OIS forward
-    ``f_for,i = (DF_for(t_{i-1})/DF_for(t_i) - 1)/tau_i`` is a discount-factor
-    ratio and so is anchor-invariant.
-
-    ``pv_for0`` is computed with ``N_dom = 1`` (``N_for = 1/S``):
-    ``PV_for0 = (1/S) · (-S + Σ F_i·f_for,i·tau_i·DF_dom_i + F_N·DF_dom_N)``. The
-    domestic leg prices to par by the single-curve identity, so it contributes
-    nothing here (§5.2).
-    """
-    schedule = build_quarterly_xccy_schedule(
-        spot_date, maturity, dom_calendar, for_calendar, _STRIP_BDC, _STRIP_DAY_COUNT
-    )
-    df_dom_spot = dom_ois.df_at(spot_date)
-
-    terms: list[_CouponTerm] = []
-    pv_acc_for = 0.0
-    for start, coupon, tau in zip(
-        schedule.period_starts, schedule.coupon_dates, schedule.taus, strict=True
-    ):
-        df_dom = dom_ois.df_at(coupon) / df_dom_spot
-        df_for = for_ois.df_at(coupon)
-        df_for_prev = for_ois.df_at(start)
-        fwd = fx_forward.forward_at(coupon)
-        f_for = (df_for_prev / df_for - 1.0) / tau
-        pv_acc_for += fwd * f_for * tau * df_dom
-        terms.append(
-            _CouponTerm(
-                tau=tau,
-                df_dom=df_dom,
-                fwd=fwd,
-                bucket=bisect_left(grid_maturities, coupon) + 1,
-            )
-        )
-
-    final_notional = terms[-1].fwd * terms[-1].df_dom
-    pv_for0 = (1.0 / spot_rate) * (-spot_rate + pv_acc_for + final_notional)
-    return terms, pv_for0
-
-
-def _net_pv(
-    *,
-    b_n_bps: float,
-    n: int,
-    terms: list[_CouponTerm],
-    pv_for0: float,
-    spot_rate: float,
-    quoted_on_foreign: bool,
-    solved_bps: list[float],
-) -> float:
-    """Net PV (domestic units) of the par swap to pillar ``n`` at trial ``b_n``.
-
-    Coupons in bucket ``n`` carry the trial ``b_n``; earlier buckets carry the
-    already-solved spreads. The spread enters the foreign leg (converted at the
-    forward) when ``quoted_on_foreign`` else the domestic leg (§5.2).
-    """
-    spread_sum = 0.0
-    for t in terms:
-        b_bps = b_n_bps if t.bucket == n else solved_bps[t.bucket - 1]
-        b_dec = b_bps / _BPS_PER_UNIT
-        weight = (t.fwd if quoted_on_foreign else 1.0) * t.tau * t.df_dom
-        spread_sum += b_dec * weight
-
-    if quoted_on_foreign:
-        # NPV = -(PV_for0 + N_for·Σ b·F·tau·DF_dom), N_for = 1/S.
-        return -(pv_for0 + spread_sum / spot_rate)
-    # NPV = N_dom·Σ b·tau·DF_dom - PV_for0, N_dom = 1.
-    return spread_sum - pv_for0
-
-
 def _solve_pillar(
     *,
     n: int,
-    terms: list[_CouponTerm],
+    terms: list[XccyCouponTerm],
+    buckets: list[int],
     pv_for0: float,
     spot_rate: float,
     quoted_on_foreign: bool,
@@ -305,17 +209,21 @@ def _solve_pillar(
     tenor_code: str,
     diagnostics: DiagnosticsCollector,
 ) -> float:
-    """brentq-solve pillar ``n`` over ±10000 bps; reprice-assert |NPV| < 1e-9."""
+    """brentq-solve pillar ``n`` over ±10000 bps; reprice-assert |NPV| < 1e-9.
+
+    Coupons in bucket ``n`` carry the trial ``b_n``; earlier buckets carry the
+    already-solved spreads. The shared kernel (M-114 / C-112) evaluates the net
+    PV from the resulting per-coupon spread vector.
+    """
 
     def npv(trial_bps: float) -> float:
-        return _net_pv(
-            b_n_bps=trial_bps,
-            n=n,
-            terms=terms,
-            pv_for0=pv_for0,
-            spot_rate=spot_rate,
+        spread_vec = [trial_bps if bk == n else solved_bps[bk - 1] for bk in buckets]
+        return net_pv(
+            terms,
+            pv_for0,
+            spot_rate,
             quoted_on_foreign=quoted_on_foreign,
-            solved_bps=solved_bps,
+            spread_bps_per_coupon=spread_vec,
         )
 
     try:
