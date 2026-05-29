@@ -1,17 +1,17 @@
 """rates.fx.bootstrap_forward — FX forward curve bootstrap (M-105).
 
-Builds an :class:`FXForwardCurve` from spot + market forward-point quotes
-under covered interest parity::
+Builds an :class:`FXForwardCurve` from spot + market forward-point quotes. The
+consumer-facing pillars carry the **quoted** outright forward
+(``S + points / forward_point_scale``), consumed verbatim.
 
-    F_parity(t) = S * DF_for(t) / DF_dom(t)
-
-In V2 the consumer-facing pillars of the returned curve carry the **quoted**
-outright forward (``S + points / forward_point_scale``). The parity formula
-provides a cross-check: when the quoted forward differs from
-``F_parity`` by more than :data:`PARITY_MISMATCH_BPS`, emit one
-``FX_PARITY_MISMATCH`` WARN per offending pillar. The cross-currency basis
-curve (M-106) is the proper place to absorb that mismatch as a stripped
-spread; V2-FX otherwise consumes the quoted forwards verbatim.
+**Parity reconciliation moved out of M-105 (A-6 / OQ-503).** The old pure-CIP
+``FX_PARITY_MISMATCH`` WARN (quoted forward vs ``S·DF_for/DF_dom``) is gone: under
+V0.4 Method (i) the basis is *defined* from the forward-vs-CIP deviation, so the
+authoritative reconciliation is the **basis-aware** gate in ``rates.app`` —
+forward-implied basis ``b_n`` vs the quoted XCCY_BASIS spread — which runs
+post-strip once both curves exist (single gate, no double-reporting). M-105 no
+longer reads the dual OIS curves; ``dom_ois`` / ``for_ois`` stay in the signature
+only for contract stability (C-102 unchanged).
 
 Quote resolution: ``mid`` → ``avg(bid, ask)`` → ``ask`` → ``bid`` → skip.
 Quotes without a usable rate are dropped with ``FX_XCCY_QUOTE_SKIPPED`` (the
@@ -30,7 +30,6 @@ from rates.fx.conventions import FXConvention
 from rates.fx.forward_curve import FXForwardCurve, FXForwardPillar
 from rates.fx.types import (
     FX_FWD_POINTS_NON_MONOTONE,
-    FX_PARITY_MISMATCH,
     FX_SPOT_MISSING,
     FX_XCCY_QUOTE_SKIPPED,
     FXForwardPointQuote,
@@ -42,8 +41,9 @@ from rates.fx.types import (
 #: (quotes are taken verbatim) but kept for parity with V1 bootstrap_curve.
 FX_FORWARD_REPRICE_TOLERANCE: float = 1e-9
 
-#: Parity mismatch threshold in basis points (relative to spot). Mismatches
-#: above this trigger ``FX_PARITY_MISMATCH``.
+#: Parity mismatch threshold in basis points. Consumed by the basis-aware
+#: ``FX_PARITY_MISMATCH`` gate in ``rates.app`` (A-6): a WARN fires when the
+#: forward-implied basis ``b_n`` and the quoted xccy spread differ by more bps.
 PARITY_MISMATCH_BPS: float = 1.0
 
 
@@ -66,15 +66,17 @@ def build_fx_forward_curve(
 
     Args:
         market:         FX snapshot. Must carry spot + ≥1 forward-point quote.
-        dom_ois:        Domestic-currency OIS curve (e.g. TRY OIS for USDTRY).
-        for_ois:        Foreign-currency OIS curve (e.g. USD OIS for USDTRY).
+        dom_ois:        Domestic-currency OIS curve — unused since A-6 moved the
+                        parity reconciliation to the orchestrator; kept for C-102
+                        signature stability.
+        for_ois:        Foreign-currency OIS curve — unused, same rationale.
         fx_convention:  Per-pair FX convention.
         diagnostics:    Single mutable collector threaded by the orchestrator.
 
     Returns:
         Frozen :class:`FXForwardCurve` with one pillar per usable forward-point
         quote (ascending by settle_date). Quoted outright forwards are kept
-        verbatim; parity mismatches surface as WARNs.
+        verbatim; parity reconciliation now happens post-strip in ``rates.app``.
 
     Raises:
         FXSpotMissingError: When spot has no usable bid/ask/mid.
@@ -131,8 +133,6 @@ def build_fx_forward_curve(
             {"pair_code": market.spot.pair.code, "skipped": len(market.forward_points)},
         )
         raise FXBootstrapError(msg)
-
-    _warn_parity_mismatches(pillars, spot_rate, dom_ois, for_ois, diagnostics)
 
     return FXForwardCurve(
         pair_code=market.spot.pair.code,
@@ -229,41 +229,6 @@ def _warn_non_monotone_tenor_days(
                     "right_tenor": quotes[i].tenor_code,
                     "left_tenor_days": quotes[i - 1].tenor_days,
                     "right_tenor_days": quotes[i].tenor_days,
-                },
-            )
-
-
-def _warn_parity_mismatches(
-    pillars: list[FXForwardPillar],
-    spot_rate: float,
-    dom_ois: OISCurve,
-    for_ois: OISCurve,
-    dg: DiagnosticsCollector,
-) -> None:
-    """Emit ``FX_PARITY_MISMATCH`` for any pillar exceeding the threshold."""
-    threshold = PARITY_MISMATCH_BPS * 1e-4 * spot_rate
-    for p in pillars:
-        try:
-            df_dom = dom_ois.df_at(p.settle_date)
-            df_for = for_ois.df_at(p.settle_date)
-        except ValueError:
-            # Settle date out of curve range — don't fail the bootstrap; just
-            # skip the parity check for that pillar.
-            continue
-        parity = spot_rate * df_for / df_dom
-        diff = p.forward_rate - parity
-        if abs(diff) > threshold:
-            dg.warn(
-                FX_PARITY_MISMATCH,
-                (
-                    f"{p.tenor_code}: quoted {p.forward_rate:.6f} vs parity "
-                    f"{parity:.6f} (diff {diff * 1e4 / spot_rate:+.2f} bps of spot)"
-                ),
-                {
-                    "tenor_code": p.tenor_code,
-                    "quoted": p.forward_rate,
-                    "parity": parity,
-                    "diff_bps_of_spot": diff * 1e4 / spot_rate,
                 },
             )
 

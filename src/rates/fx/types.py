@@ -29,6 +29,9 @@ FX_XCCY_QUOTE_SKIPPED: str = "FX_XCCY_QUOTE_SKIPPED"
 FX_BOOTSTRAP_NON_CONVERGENT: str = "FX_BOOTSTRAP_NON_CONVERGENT"
 FX_XCCY_REPRICE_FAIL: str = "FX_XCCY_REPRICE_FAIL"
 FX_XCCY_FORWARD_COVERAGE: str = "FX_XCCY_FORWARD_COVERAGE"
+#: Pricing read a v1 FXSummary (no embedded OIS pillars), so the dual OIS curves
+#: cannot be reconstructed for the calibrated pricer — abort (C-110, §7).
+FX_PRICE_SCHEMA_TOO_OLD: str = "FX_PRICE_SCHEMA_TOO_OLD"
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +232,7 @@ __all__ = [
     "FX_FOR_CCY_CURVE_MISSING",
     "FX_FWD_POINTS_NON_MONOTONE",
     "FX_PARITY_MISMATCH",
+    "FX_PRICE_SCHEMA_TOO_OLD",
     "FX_SPOT_MISSING",
     "FX_XCCY_FORWARD_COVERAGE",
     "FX_XCCY_QUOTE_SKIPPED",

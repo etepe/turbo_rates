@@ -100,16 +100,30 @@ def price_xccy_basis_swap(
 ) -> float:
     """Fair basis spread (bps) for a par cross-currency basis swap.
 
-    V2 returns the spread directly from the basis curve at the maturity
-    date. The dual OIS curves are accepted today so the contract stays
-    stable; V3 will tighten this into a full par xccy swap pricing pass
-    against those curves + the FX forward curve.
+    The fair spread at ``maturity_date`` is the value of the **stripped**
+    basis term-structure there (M-106 calibrates each pillar to net PV = 0):
+
+    * at a calibrated pillar ``T_n``, ``basis_at(T_n)`` returns the stored
+      ``b_n`` exactly — the round-trip identity (F-302 AC#1);
+    * between pillars, ``basis_at(m)`` interpolates the term-structure under
+      the curve's convention (FX-O2 piecewise-linear bps).
+
+    This is the *marginal* ``b(m)`` of the stored curve, deliberately **not**
+    a fresh par-swap re-solve to ``m`` (OQ-501 / A-4): a re-solve yields a par
+    swap's *flat* spread, which differs from the curve's marginal spread when
+    the curve is non-flat — mixing the two representations is inconsistent.
+    Interpolating the stored curve keeps C-108 frozen and needs neither the FX
+    forward curve nor a schedule.
+
+    ``dom_ois`` / ``for_ois`` are **not consumed by the V0.4 pricer**. They are
+    kept in the signature for MtM-readiness: a future mark-to-market xccy pricer
+    re-solves a live swap against the dual OIS curves (D-13/A-8). The call site
+    passes the real reconstructed curves (C-110), not a placeholder.
 
     Args:
         basis:         Bootstrapped cross-currency basis curve.
-        dom_ois:       Domestic OIS curve (held for V3 calibration; accepted
-                       to keep the contract surface stable).
-        for_ois:       Foreign OIS curve (same rationale as ``dom_ois``).
+        dom_ois:       Domestic OIS curve — unused in V0.4; reserved for MtM.
+        for_ois:       Foreign OIS curve — unused in V0.4; reserved for MtM.
         maturity_date: Final settlement of the basis swap.
 
     Returns:
@@ -119,9 +133,6 @@ def price_xccy_basis_swap(
     Raises:
         ValueError: When ``maturity_date`` is out of range on ``basis``.
     """
-    # dom_ois / for_ois reserved for V3 calibration; referenced here so the
-    # signature stays stable today without triggering an unused-arg lint.
-    _ = (dom_ois, for_ois)
     return basis.basis_at(maturity_date)
 
 

@@ -11,7 +11,6 @@ from rates.core.curve import OISCurve, Pillar
 from rates.core.diagnostics import DiagnosticsCollector
 from rates.core.types import DayCount
 from rates.fx.bootstrap_forward import (
-    PARITY_MISMATCH_BPS,
     FXBootstrapError,
     FXSpotMissingError,
     build_fx_forward_curve,
@@ -131,43 +130,23 @@ def test_bootstrap_emits_one_pillar_per_forward_point() -> None:
     assert not dg.has_errors()
 
 
-@pytest.mark.phase7
-def test_parity_mismatch_warns_when_implied_differs_from_quoted() -> None:
-    """A quoted forward way off parity emits FX_PARITY_MISMATCH WARN."""
+# NOTE: M-105's pure-CIP FX_PARITY_MISMATCH WARN was removed in V0.4 (A-6 /
+# OQ-503). The parity reconciliation is now the basis-aware gate in rates.app,
+# unit-tested in tests/app/test_fx_parity_gate.py; M-105 no longer emits it.
+
+
+@pytest.mark.phase9
+def test_m105_no_longer_emits_parity_mismatch() -> None:
+    """A-6: even wildly off-parity forwards produce no FX_PARITY_MISMATCH from
+    M-105 — the basis-aware gate in rates.app is now the single authority."""
     spot = 32.5
     market = FXMarketData(
         spot=_spot(spot),
-        # 12000 pips at 6M is much higher than parity for these rates.
-        forward_points=(_fwd(180, 12000.0),),
+        forward_points=(_fwd(180, 12000.0),),  # far above CIP for these rates
         valuation_date=_VAL,
     )
     dg = DiagnosticsCollector()
-    dom = _flat_ois(0.10)
-    for_ = _flat_ois(0.05)
-    build_fx_forward_curve(market, dom, for_, _conv(), dg)
-    assert FX_PARITY_MISMATCH in _codes(dg)
-
-
-@pytest.mark.phase7
-def test_parity_in_line_emits_no_mismatch() -> None:
-    """When quotes match covered parity to a fraction of a bp, no WARN."""
-    spot = 32.5
-    r_dom, r_for = 0.45, 0.05
-    dom = _flat_ois(r_dom)
-    for_ = _flat_ois(r_for)
-    # Choose forward points that exactly hit parity at each settle.
-    pillars_days = (30, 90, 180)
-    quotes: list[FXForwardPointQuote] = []
-    for d in pillars_days:
-        settle = _SPOT_DATE + timedelta(days=d)
-        parity = spot * for_.df_at(settle) / dom.df_at(settle)
-        points = (parity - spot) * 10000
-        quotes.append(_fwd(d, points))
-    market = FXMarketData(
-        spot=_spot(spot), forward_points=tuple(quotes), valuation_date=_VAL
-    )
-    dg = DiagnosticsCollector()
-    build_fx_forward_curve(market, dom, for_, _conv(), dg)
+    build_fx_forward_curve(market, _flat_ois(0.10), _flat_ois(0.05), _conv(), dg)
     assert FX_PARITY_MISMATCH not in _codes(dg)
     assert not dg.has_errors()
 
@@ -209,34 +188,6 @@ def test_empty_forward_points_raises_bootstrap_error() -> None:
             market, _flat_ois(0.45), _flat_ois(0.05), _conv(), dg
         )
     assert dg.has_errors()
-
-
-@pytest.mark.phase7
-def test_parity_threshold_is_exactly_one_bp_of_spot() -> None:
-    """Threshold = 1 bp of spot; just above ⇒ WARN, just below ⇒ silent."""
-    spot = 32.5
-    r_dom, r_for = 0.45, 0.05
-    dom = _flat_ois(r_dom)
-    for_ = _flat_ois(r_for)
-    settle = _SPOT_DATE + timedelta(days=90)
-    parity = spot * for_.df_at(settle) / dom.df_at(settle)
-    bp = PARITY_MISMATCH_BPS * 1e-4 * spot
-    # Just above threshold
-    quote_above = _fwd(90, (parity - spot + 1.1 * bp) * 10000)
-    dg_above = DiagnosticsCollector()
-    build_fx_forward_curve(
-        FXMarketData(spot=_spot(spot), forward_points=(quote_above,), valuation_date=_VAL),
-        dom, for_, _conv(), dg_above,
-    )
-    assert FX_PARITY_MISMATCH in _codes(dg_above)
-    # Just below threshold
-    quote_below = _fwd(90, (parity - spot + 0.5 * bp) * 10000)
-    dg_below = DiagnosticsCollector()
-    build_fx_forward_curve(
-        FXMarketData(spot=_spot(spot), forward_points=(quote_below,), valuation_date=_VAL),
-        dom, for_, _conv(), dg_below,
-    )
-    assert FX_PARITY_MISMATCH not in _codes(dg_below)
 
 
 @pytest.mark.phase7
