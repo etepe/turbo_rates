@@ -5,6 +5,73 @@ All notable changes to this project are recorded here. Format follows
 [SemVer](https://semver.org/). The `develop` branch carries unreleased work;
 `main` carries tagged releases.
 
+## [0.4.0] — 2026-05-29
+
+### Added — cross-currency basis stripping calibration (V0.4 / MON-021)
+
+The FX cross-currency basis curve is now **calibrated** rather than carried
+verbatim: each pillar is stripped so a constant-notional float-float xccy
+basis swap reprices to net PV = 0 (Method (i) — foreign leg converted at the
+full FX forward curve, discounted on the domestic OIS). The basis is
+*forward-implied* (XCCY_BASIS quote values are not strip inputs — only their
+tenor grid + sign are; the quote is reconciled against the forward-implied
+basis by the parity gate). Architecture is
+`docs/v04-xccy-calibration-architecture.md` (validated, grill-passed MON-020).
+PRs #23 (requirements), #24 (architecture), #25 (grill revisions), #26 (M-113),
+#27 (M-106), #28 (M-109/M-110), #29 (M-107/M-111), #30 (fixtures + smoke gate).
+
+- **`rates.fx.schedule`** (M-113, new) — `build_quarterly_xccy_schedule`:
+  joint-calendar-rolled quarterly (3M) coupon dates, single Act/360 accrual,
+  back stub ending exactly on maturity. Independently unit-testable. PR #26.
+- **`rates.fx.bootstrap_basis`** (M-106) — `build_cross_basis_curve` strips
+  each pillar by sequential par→pillar net-PV=0 calibration (`scipy.brentq`
+  over ±10000 bps + reprice assert `|NPV| < 1e-9`). New ERROR
+  `FX_XCCY_FORWARD_COVERAGE` when the forward curve cannot reach the longest
+  xccy coupon date (no silent extrapolation, OQ-505). Gains `dom_calendar` /
+  `for_calendar` (C-104', the one signature change). PR #27.
+- **`rates.io.schemas`** (M-109) — `FX_SCHEMA_VERSION` 1 → 2: embeds the dual
+  OIS pillar lists + per-ccy `FXOisMeta` (valuation_date, day_count,
+  interpolation) + per-basis-pillar `strip_residual` for audit / MtM-readiness
+  (D-16, A-8). PR #28.
+- **`rates.io.persistence` / `rates.app`** (M-110/M-111) — FXSummary v2 write
+  threads both OIS curves; `_dom_ois_from_summary` / `_for_ois_from_summary`
+  reconstruction adapters (C-110) replace the `_UNUSED_OIS` placeholder
+  (F-305 grep-clean); `run_fx_price_xccy` prices on the real reconstructed
+  curves and aborts a v1 summary with `FX_PRICE_SCHEMA_TOO_OLD`. PRs #28, #29.
+- **`rates.fx.pricer`** (M-107) — `price_xccy_basis_swap` returns the marginal
+  basis of the stored term-structure (`basis.basis_at(m)`); at a calibrated
+  pillar this is the round-trip identity `b_n`. C-108 signature unchanged
+  (OQ-501 declined the re-solve extension). PR #29.
+
+### Changed
+
+- **`FX_PARITY_MISMATCH` is now basis-aware** (D-12, A-6 / OQ-503). The
+  orchestrator runs a single post-strip gate comparing the forward-implied
+  basis `b_n` against the quoted XCCY_BASIS spread (> 1.0 bps ⇒ WARN);
+  `rates.fx.bootstrap_forward` (M-105) no longer emits the old pure-CIP WARN
+  (no double-reporting). PR #29.
+- **Smoke fixtures are now arbitrage-consistent** — the curated FX forwards
+  EMBED the −180 bps basis via a uniform Method-(i) inversion (A-1), so the
+  strip recovers −180 and the basis-aware gate passes meaningfully.
+  `scripts/fx_smoke_test.py` asserts exit 0, zero `FX_PARITY_MISMATCH`, zero
+  `FX_XCCY_REPRICE_FAIL`, and stripped 1Y ≈ −180. PR #30.
+
+### Validation gate at release cut
+
+- `mypy --strict src/rates` clean; `ruff check src tests scripts` clean.
+- `pytest -q` green (new `phase9` suite: strip net-PV=0, hand-computed
+  micro-case with native day-counts (grill G-2), CIP degeneracy, schedule
+  boundaries, schema v2 round-trip, C-110 reconstruction, basis-aware parity).
+- V1 OIS regression smoke (`scripts/smoke_test.py`) exit 0, unchanged.
+
+### Not in this release
+
+V0.4 keeps the simplifications documented in the architecture: single
+common Act/360 on both xccy legs (OQ-403 bias measured + bounded, not
+removed); FX-forward log-linear interpolation reused as-is; MtM xccy pricer
+(the dual OIS curves are embedded + reconstructed for it but not yet
+consumed); per-leg native day-counts; multi-pair beyond USDTRY/EURTRY.
+
 ## [0.3.0] — 2026-05-28
 
 ### Added — FX IO / CLI / app wiring (the "Not in this release" item from 0.2.0)
