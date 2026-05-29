@@ -45,11 +45,13 @@ fixings, no mid-period stub, and no accrued interest. The PV is reported **as of
 the spot date** (D-607). This reuses the strip's exact PV machinery
 (`_coupon_terms` / `_net_pv`, §5/§5.2 of the V0.4 architecture, lifted into a
 shared kernel — F-602), so the two surfaces stay arbitrage-consistent by
-construction. The PV is linear in the contract spread (closed form,
-foreign-quoted): **`PV = N_for · (contract_spread − s_par_flat) · A_total`**,
-where `A_total = Σ F_i·τ_i·DF_dom_i` over the full schedule and `s_par_flat` is
-the swap's **par flat spread** (the single flat spread that makes a new
-spot→`maturity` swap par). Hence:
+construction. The PV is linear in the contract spread and zero at the swap's
+**par flat spread** `s_par_flat` (the single flat spread that makes a new
+spot→`maturity` swap par). For the canonical **RECEIVE_DOMESTIC** base +
+foreign-quoted leg the closed form is **`PV = N_for · (s_par_flat −
+contract_spread) · A_for / 1e4`**, `A_for = Σ F_i·τ_i·DF_dom_i`; the shared
+`net_pv` kernel is **authoritative** for the exact sign under each
+(`quoted_on_foreign`, `direction`) combination (grill Bulgu 3). Hence:
 
 - a contract priced **at the par flat spread** `s_par_flat` reprices to
   **PV ≈ 0** (round-trip self-consistency, true at any priceable maturity);
