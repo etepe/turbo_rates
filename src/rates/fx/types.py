@@ -50,6 +50,19 @@ class QuoteConvention(StrEnum):
     INDIRECT = "indirect"
 
 
+class XccySwapDirection(StrEnum):
+    """Which side of a cross-currency basis swap an MtM PV is reported for (M-107).
+
+    ``RECEIVE_DOMESTIC`` is the base perspective of the shared net-PV kernel
+    (receive the domestic leg, pay the foreign leg + basis); ``PAY_DOMESTIC`` is
+    the opposite side (PV negated). This is independent of ``quoted_on_foreign``,
+    which selects *which leg carries the spread*, not which side you are on.
+    """
+
+    RECEIVE_DOMESTIC = "receive-domestic"
+    PAY_DOMESTIC = "pay-domestic"
+
+
 # ---------------------------------------------------------------------------
 # CurrencyPair
 # ---------------------------------------------------------------------------
@@ -245,4 +258,5 @@ __all__ = [
     "FXSwapPricing",
     "FXSwapQuote",
     "QuoteConvention",
+    "XccySwapDirection",
 ]
