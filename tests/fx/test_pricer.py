@@ -226,3 +226,14 @@ def test_xccy_basis_pricer_propagates_date_out_of_range() -> None:
     for_ = _flat_ois(0.05)
     with pytest.raises(ValueError, match="DateOutOfRange"):
         price_xccy_basis_swap(basis, dom, for_, date(2099, 1, 1))
+
+
+@pytest.mark.phase9
+def test_xccy_round_trip_identity_at_every_pillar() -> None:
+    """F-302 AC#1 (OQ-501): at each calibrated pillar the pricer returns the
+    stored b_n exactly — basis_at(T_n) == spread_bps, no re-solve."""
+    basis = _basis_curve()
+    dom = _flat_ois(0.45)
+    for_ = _flat_ois(0.05)
+    for p in basis.pillars_tuple:
+        assert price_xccy_basis_swap(basis, dom, for_, p.maturity_date) == p.spread_bps

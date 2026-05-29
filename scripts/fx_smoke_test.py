@@ -1,15 +1,20 @@
-"""v0.3.0 FX smoke test — manual gate per docs/fx-smoke-test.md.
+"""V0.4 FX smoke test — manual gate per docs/fx-smoke-test.md.
 
 Runs `rates fx bootstrap` against the curated USDTRY fixture under
-`fixtures/fx_smoke_usdtry/` and asserts the v0.3.0 acceptance criteria from
-`docs/fx-io-architecture.md` §10:
+`fixtures/fx_smoke_usdtry/` and asserts the V0.4 acceptance criteria from
+`docs/v04-xccy-calibration-architecture.md` §6.2 / §11:
 
 * exit code 0
 * the persisted summary JSON loads back into Pydantic without errors
-* zero `FX_PARITY_MISMATCH` warnings emitted (the fixture is parity-tight by
-  construction — see the comment block at the top of
-  `usdtry_fx_snapshot_20260612.csv`)
+* zero `FX_PARITY_MISMATCH` warnings — the fixture's forwards EMBED the -180 bps
+  basis (A-1), so the basis-aware gate finds forward-implied ≈ quoted
+* zero `FX_XCCY_REPRICE_FAIL` (the strip reprices each pillar to net PV ≈ 0)
+* the stripped 1Y basis recovers ≈ -180 bps (the embedded target)
 * the forward + basis curves are reconstructable from the summary
+
+The independent ground-truth anchors for the strip math (hand-computed micro-case
+with native day-counts + CIP-tight degeneracy, grill G-2) live in
+`tests/fx/test_strip.py`; this smoke gate is the end-to-end self-consistency check.
 
 Not part of CI — runs against committed curated CSVs, but the in-process
 re-derivation step (`--regenerate`) requires the dev environment.
@@ -17,8 +22,8 @@ re-derivation step (`--regenerate`) requires the dev environment.
 Usage:
     PYTHONPATH=src python scripts/fx_smoke_test.py             # validate
     PYTHONPATH=src python scripts/fx_smoke_test.py --regenerate
-        # recompute parity-implied forward points and overwrite the FX CSV;
-        # useful after any OIS-snapshot or bootstrap-math change.
+        # recompute the basis-embedding forward points and overwrite the FX CSV;
+        # useful after any OIS-snapshot or strip-math change.
 """
 
 from __future__ import annotations
@@ -40,11 +45,14 @@ _FX_CSV = FIXTURES / f"usdtry_fx_snapshot_{_AS_OF.strftime('%Y%m%d')}.csv"
 _TRY_CSV = FIXTURES / f"try_ois_snapshot_{_AS_OF.strftime('%Y%m%d')}.csv"
 _USD_CSV = FIXTURES / f"usd_ois_snapshot_{_AS_OF.strftime('%Y%m%d')}.csv"
 
-# Tenor table used both for regeneration and for cross-checking the fixture.
-# (1M, 3M, 6M only — TRY OIS last pillar is 2027-06-14, so 1Y parity check
-# would extrapolate. XCCY 1Y at 360 days lands at 2027-06-10, inside range.)
-_FWD_TENORS: list[tuple[str, int]] = [("1M", 30), ("3M", 91), ("6M", 183)]
+# Single 1Y xccy basis quote; the strip recovers this from the embedded forwards.
 _XCCY_TENORS: list[tuple[str, int, float]] = [("1Y", 360, -180.0)]
+
+# Forward pillar labels by calendar-day offset from spot. Pillars sit on the 1Y
+# swap's quarterly coupon dates (so the strip's forward_at hits them exactly),
+# plus a 1M pillar for outright/swap pricing realism. Unknown offsets fall back
+# to a "<n>D" label.
+_FWD_LABELS: dict[int, str] = {30: "1M", 92: "3M", 183: "6M", 273: "9M", 360: "12M"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -106,30 +114,68 @@ def _validate() -> int:
     parity_warns = [d for d in summary.diagnostics if d.code == "FX_PARITY_MISMATCH"]
     if parity_warns:
         print(
-            f"FAIL: {len(parity_warns)} FX_PARITY_MISMATCH WARN(s); "
-            f"fixture is not parity-tight. Run with --regenerate.",
+            f"FAIL: {len(parity_warns)} FX_PARITY_MISMATCH WARN(s); the embedded "
+            f"basis disagrees with the quote. Run with --regenerate.",
             file=sys.stderr,
         )
         for d in parity_warns:
             print(f"  WARN {d.code}: {d.message}", file=sys.stderr)
         return 1
 
+    reprice_fails = [d for d in summary.diagnostics if d.code == "FX_XCCY_REPRICE_FAIL"]
+    if reprice_fails:
+        print(f"FAIL: {len(reprice_fails)} FX_XCCY_REPRICE_FAIL ERROR(s).", file=sys.stderr)
+        return 1
+
+    if not summary.basis_pillars:
+        print("FAIL: no basis pillars stripped from the snapshot.", file=sys.stderr)
+        return 1
+    _, _, target_bps = _XCCY_TENORS[0]
+    stripped_bps = summary.basis_pillars[0].spread_bps
+    if abs(stripped_bps - target_bps) > 0.5:
+        print(
+            f"FAIL: stripped 1Y basis {stripped_bps:+.4f} bps is not within 0.5 bps "
+            f"of the embedded target {target_bps:+.1f} bps.",
+            file=sys.stderr,
+        )
+        return 1
+
     print(
         f"OK: {len(summary.forward_pillars)} forward pillar(s), "
         f"{len(summary.basis_pillars)} basis pillar(s), "
         f"{len(summary.diagnostics)} diagnostic(s), "
-        f"0 FX_PARITY_MISMATCH WARNs."
+        f"stripped 1Y basis {stripped_bps:+.2f} bps, "
+        f"0 FX_PARITY_MISMATCH / 0 FX_XCCY_REPRICE_FAIL."
     )
     return 0
 
 
 def _regenerate_fx_snapshot() -> None:
-    """Bootstrap both OIS curves, compute parity forwards, rewrite the FX CSV."""
+    """Bootstrap both OIS curves, embed b*=-180 bps into the forwards, rewrite the CSV.
+
+    Method (i) inversion (architecture §5.4 / §6.2, OQ-504). A single 1Y xccy
+    pillar is a one-bucket strip whose net PV is linear in the basis. With the
+    spot-anchored CIP forward ``F_CIP(t) = S · DF_for_rel(t) / DF_dom_rel(t)`` the
+    foreign leg + notional reprice to exactly ``S`` (the accrual ``tau`` cancels in
+    the telescoping foreign-OIS forward), so a **uniform** multiplicative shift
+    ``F = F_CIP · (1 + δ)`` gives ``PV_for0 = δ`` and a stripped
+    ``b_dec = -S · δ / ((1 + δ) · A_CIP)`` where
+    ``A_CIP = Σ F_CIP(t_i) · tau_i · DF_dom_rel(t_i)``. Inverting for the target
+    ``b*`` is the closed form
+
+        δ = -b*_dec · A_CIP / (S + b*_dec · A_CIP)
+
+    which reproduces ``b*`` to machine precision — no per-period solve needed
+    (OQ-504). Forward pillars sit on the quarterly coupon dates so the strip's
+    ``forward_at`` hits each exactly; coverage reaches the longest coupon (OQ-505).
+    """
     from rates.core.bootstrap import bootstrap_curve
     from rates.core.calendar import HolidayCalendar
     from rates.core.conventions import Conventions
     from rates.core.diagnostics import DiagnosticsCollector
+    from rates.core.types import BusinessDayConvention, DayCount
     from rates.fx.conventions import FXConventions
+    from rates.fx.schedule import build_quarterly_xccy_schedule
     from rates.io.market import CsvProvider
 
     conv = Conventions.load(REPO_ROOT / "config" / "conventions.yaml")
@@ -154,43 +200,59 @@ def _regenerate_fx_snapshot() -> None:
             spot = spot + timedelta(days=1)
 
     spot_rate = 32.4520
+    scale = fx_conv.forward_point_scale
+    xccy_code, xccy_days, xccy_bps = _XCCY_TENORS[0]
+
+    # Quarterly schedule + the uniform δ that embeds b* into the CIP forwards.
+    maturity = spot + timedelta(days=xccy_days)  # mirrors FxCsvProvider's maturity
+    sched = build_quarterly_xccy_schedule(
+        spot, maturity, tr_cal, us_cal,
+        BusinessDayConvention.MODIFIED_FOLLOWING, DayCount.ACT_360,
+    )
+    df_dom_spot = tr_curve.df_at(spot)
+    df_for_spot = us_curve.df_at(spot)
+
+    def f_cip(t: date) -> float:
+        return spot_rate * (us_curve.df_at(t) / df_for_spot) / (tr_curve.df_at(t) / df_dom_spot)
+
+    a_cip = sum(
+        f_cip(c) * tau * (tr_curve.df_at(c) / df_dom_spot)
+        for c, tau in zip(sched.coupon_dates, sched.taus, strict=True)
+    )
+    b_target = xccy_bps / 10000.0
+    delta = -b_target * a_cip / (spot_rate + b_target * a_cip)
+
+    rows: list[str] = [
+        "# schema: fx-v1",
+        "# Curated arbitrage-consistent FX snapshot — regenerated by scripts/fx_smoke_test.py.",
+        f"# Forward points EMBED a {xccy_bps:.0f} bps xccy basis via F = F_CIP * (1 + delta),",
+        f"# delta={delta:.8f} (uniform Method-(i) inversion, architecture §5.4/§6.2). The",
+        f"# V0.4 strip recovers ~{xccy_bps:.0f} bps so the basis-aware parity gate stays silent.",
+        "pair,instrument_type,tenor_code,tenor_days,bid,ask,mid,source",
+    ]
     bid_offset = 0.0020  # 20 pips half-spread on spot
-    rows: list[str] = ["# schema: fx-v1"]
-    rows.append(
-        "# Curated parity-tight FX snapshot — regenerated by scripts/fx_smoke_test.py."
-    )
-    rows.append(
-        "# Forward points satisfy F = S * DF_USD / DF_TRY (covered interest parity)"
-    )
-    rows.append("# so the M-105 parity check emits zero FX_PARITY_MISMATCH WARNs.")
-    rows.append(
-        "pair,instrument_type,tenor_code,tenor_days,bid,ask,mid,source"
-    )
     rows.append(
         f"USDTRY,SPOT,SPOT,0,{spot_rate - bid_offset:.4f},{spot_rate + bid_offset:.4f},"
         f"{spot_rate:.4f},CURATED"
     )
 
-    scale = fx_conv.forward_point_scale
-    half_spread = 6.0  # ~6 points each side; tweak to taste
-
-    for tenor_code, days in _FWD_TENORS:
-        settle = spot + timedelta(days=days)
-        df_tr = tr_curve.df_at(settle)
-        df_us = us_curve.df_at(settle)
-        parity_f = spot_rate * df_us / df_tr
-        points = (parity_f - spot_rate) * scale
+    half_spread = 6.0  # ~6 points each side
+    coupon_offsets = [(c - spot).days for c in sched.coupon_dates]
+    fwd_offsets = sorted({30, *coupon_offsets})
+    for off in fwd_offsets:
+        settle = spot + timedelta(days=off)
+        f = f_cip(settle) * (1.0 + delta)
+        points = (f - spot_rate) * scale
+        label = _FWD_LABELS.get(off, f"{off}D")
         rows.append(
-            f"USDTRY,FORWARD_POINT,{tenor_code},{days},"
-            f"{points - half_spread:.1f},{points + half_spread:.1f},"
-            f"{points:.1f},CURATED"
+            f"USDTRY,FORWARD_POINT,{label},{off},"
+            f"{points - half_spread:.1f},{points + half_spread:.1f},{points:.1f},CURATED"
         )
 
-    for tenor_code, days, bps in _XCCY_TENORS:
-        rows.append(
-            f"USDTRY,XCCY_BASIS,{tenor_code},{days},"
-            f"{bps - 5.0:.1f},{bps + 5.0:.1f},{bps:.1f},CURATED"
-        )
+    rows.append(
+        f"USDTRY,XCCY_BASIS,{xccy_code},{xccy_days},"
+        f"{xccy_bps - 5.0:.1f},{xccy_bps + 5.0:.1f},{xccy_bps:.1f},CURATED"
+    )
 
     tmp = _FX_CSV.with_suffix(".csv.tmp")
     tmp.write_text("\n".join(rows) + "\n", encoding="utf-8")

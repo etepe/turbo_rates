@@ -1,0 +1,361 @@
+{
+  "$defs": {
+    "DiagnosticOut": {
+      "additionalProperties": false,
+      "description": "Diagnostic record in the persisted Summary.",
+      "properties": {
+        "severity": {
+          "enum": [
+            "WARN",
+            "ERROR"
+          ],
+          "title": "Severity",
+          "type": "string"
+        },
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "context": {
+          "additionalProperties": true,
+          "title": "Context",
+          "type": "object"
+        }
+      },
+      "required": [
+        "severity",
+        "code",
+        "message"
+      ],
+      "title": "DiagnosticOut",
+      "type": "object"
+    },
+    "FXBasisPillarOut": {
+      "additionalProperties": false,
+      "description": "Cross-currency basis pillar in the persisted FXSummary.",
+      "properties": {
+        "tenor_code": {
+          "title": "Tenor Code",
+          "type": "string"
+        },
+        "tenor_days": {
+          "title": "Tenor Days",
+          "type": "integer"
+        },
+        "maturity_date": {
+          "format": "date",
+          "title": "Maturity Date",
+          "type": "string"
+        },
+        "spread_bps": {
+          "title": "Spread Bps",
+          "type": "number"
+        },
+        "quoted_on_foreign": {
+          "title": "Quoted On Foreign",
+          "type": "boolean"
+        },
+        "strip_residual": {
+          "title": "Strip Residual",
+          "type": "number"
+        }
+      },
+      "required": [
+        "tenor_code",
+        "tenor_days",
+        "maturity_date",
+        "spread_bps",
+        "quoted_on_foreign",
+        "strip_residual"
+      ],
+      "title": "FXBasisPillarOut",
+      "type": "object"
+    },
+    "FXConfigSnapshot": {
+      "additionalProperties": false,
+      "description": "FX pipeline configuration snapshot embedded in every FXSummary.",
+      "properties": {
+        "pair_code": {
+          "title": "Pair Code",
+          "type": "string"
+        },
+        "domestic_currency": {
+          "title": "Domestic Currency",
+          "type": "string"
+        },
+        "foreign_currency": {
+          "title": "Foreign Currency",
+          "type": "string"
+        },
+        "quote_convention": {
+          "enum": [
+            "direct",
+            "indirect"
+          ],
+          "title": "Quote Convention",
+          "type": "string"
+        },
+        "spot_lag_days": {
+          "title": "Spot Lag Days",
+          "type": "integer"
+        },
+        "settlement_calendars": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Settlement Calendars",
+          "type": "array"
+        },
+        "forward_point_scale": {
+          "title": "Forward Point Scale",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "pair_code",
+        "domestic_currency",
+        "foreign_currency",
+        "quote_convention",
+        "spot_lag_days",
+        "settlement_calendars",
+        "forward_point_scale"
+      ],
+      "title": "FXConfigSnapshot",
+      "type": "object"
+    },
+    "FXForwardPillarOut": {
+      "additionalProperties": false,
+      "description": "Forward-curve pillar in the persisted FXSummary.",
+      "properties": {
+        "tenor_code": {
+          "title": "Tenor Code",
+          "type": "string"
+        },
+        "tenor_days": {
+          "title": "Tenor Days",
+          "type": "integer"
+        },
+        "settle_date": {
+          "format": "date",
+          "title": "Settle Date",
+          "type": "string"
+        },
+        "forward_rate": {
+          "title": "Forward Rate",
+          "type": "number"
+        }
+      },
+      "required": [
+        "tenor_code",
+        "tenor_days",
+        "settle_date",
+        "forward_rate"
+      ],
+      "title": "FXForwardPillarOut",
+      "type": "object"
+    },
+    "FXOisMeta": {
+      "additionalProperties": false,
+      "description": "Per-currency OIS curve metadata for FXSummary v2 reconstruction (D-16).\n\nCarries exactly the scalars an OIS curve needs to be rebuilt alongside its\npersisted ``PillarOut`` list (C-110, Phase 4): the valuation date, the native\nday-count, and the interpolation scheme.",
+      "properties": {
+        "valuation_date": {
+          "format": "date",
+          "title": "Valuation Date",
+          "type": "string"
+        },
+        "day_count": {
+          "title": "Day Count",
+          "type": "string"
+        },
+        "interpolation": {
+          "title": "Interpolation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "valuation_date",
+        "day_count",
+        "interpolation"
+      ],
+      "title": "FXOisMeta",
+      "type": "object"
+    },
+    "FXParityCheckRow": {
+      "additionalProperties": false,
+      "description": "Per-pillar covered-interest-parity check result (M-105).",
+      "properties": {
+        "tenor_code": {
+          "title": "Tenor Code",
+          "type": "string"
+        },
+        "settle_date": {
+          "format": "date",
+          "title": "Settle Date",
+          "type": "string"
+        },
+        "quoted_forward": {
+          "title": "Quoted Forward",
+          "type": "number"
+        },
+        "parity_forward": {
+          "title": "Parity Forward",
+          "type": "number"
+        },
+        "diff_bps_of_spot": {
+          "title": "Diff Bps Of Spot",
+          "type": "number"
+        }
+      },
+      "required": [
+        "tenor_code",
+        "settle_date",
+        "quoted_forward",
+        "parity_forward",
+        "diff_bps_of_spot"
+      ],
+      "title": "FXParityCheckRow",
+      "type": "object"
+    },
+    "PillarOut": {
+      "additionalProperties": false,
+      "description": "Bootstrapped pillar row in the persisted Summary.",
+      "properties": {
+        "tenor_code": {
+          "title": "Tenor Code",
+          "type": "string"
+        },
+        "tenor_days": {
+          "title": "Tenor Days",
+          "type": "integer"
+        },
+        "end_date": {
+          "format": "date",
+          "title": "End Date",
+          "type": "string"
+        },
+        "rate": {
+          "title": "Rate",
+          "type": "number"
+        },
+        "discount_factor": {
+          "title": "Discount Factor",
+          "type": "number"
+        }
+      },
+      "required": [
+        "tenor_code",
+        "tenor_days",
+        "end_date",
+        "rate",
+        "discount_factor"
+      ],
+      "title": "PillarOut",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Top-level persisted FX summary.\n\nMirrors :class:`Summary` (V1 OIS) at the FX layer. Fields are in stable\norder; reordering bumps ``schema_version`` per the same policy.",
+  "properties": {
+    "schema_version": {
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "pair_code": {
+      "title": "Pair Code",
+      "type": "string"
+    },
+    "valuation_date": {
+      "format": "date",
+      "title": "Valuation Date",
+      "type": "string"
+    },
+    "spot_date": {
+      "format": "date",
+      "title": "Spot Date",
+      "type": "string"
+    },
+    "as_of_timestamp": {
+      "format": "date-time",
+      "title": "As Of Timestamp",
+      "type": "string"
+    },
+    "spot_rate": {
+      "title": "Spot Rate",
+      "type": "number"
+    },
+    "forward_pillars": {
+      "items": {
+        "$ref": "#/$defs/FXForwardPillarOut"
+      },
+      "title": "Forward Pillars",
+      "type": "array"
+    },
+    "basis_pillars": {
+      "items": {
+        "$ref": "#/$defs/FXBasisPillarOut"
+      },
+      "title": "Basis Pillars",
+      "type": "array"
+    },
+    "parity_checks": {
+      "items": {
+        "$ref": "#/$defs/FXParityCheckRow"
+      },
+      "title": "Parity Checks",
+      "type": "array"
+    },
+    "diagnostics": {
+      "items": {
+        "$ref": "#/$defs/DiagnosticOut"
+      },
+      "title": "Diagnostics",
+      "type": "array"
+    },
+    "config_snapshot": {
+      "$ref": "#/$defs/FXConfigSnapshot"
+    },
+    "dom_ois_pillars": {
+      "items": {
+        "$ref": "#/$defs/PillarOut"
+      },
+      "title": "Dom Ois Pillars",
+      "type": "array"
+    },
+    "for_ois_pillars": {
+      "items": {
+        "$ref": "#/$defs/PillarOut"
+      },
+      "title": "For Ois Pillars",
+      "type": "array"
+    },
+    "dom_ois_meta": {
+      "$ref": "#/$defs/FXOisMeta"
+    },
+    "for_ois_meta": {
+      "$ref": "#/$defs/FXOisMeta"
+    }
+  },
+  "required": [
+    "schema_version",
+    "pair_code",
+    "valuation_date",
+    "spot_date",
+    "as_of_timestamp",
+    "spot_rate",
+    "forward_pillars",
+    "basis_pillars",
+    "parity_checks",
+    "diagnostics",
+    "config_snapshot",
+    "dom_ois_pillars",
+    "for_ois_pillars",
+    "dom_ois_meta",
+    "for_ois_meta"
+  ],
+  "title": "FXSummary",
+  "type": "object"
+}

@@ -20,9 +20,9 @@ from rates.app import run_fx_diagnose
 def test_run_fx_diagnose_happy_path_returns_zero(fx_diagnose_args, tmp_path) -> None:
     """Curated USDTRY fixture: pipeline runs end-to-end without ERROR.
 
-    The fixture is intentionally not parity-tight (TRY OIS rate of 42% vs USD
-    OIS 4.8% produces a huge implied forward), so FX_PARITY_MISMATCH WARNs
-    are expected. Exit code is 0 because they are WARN-only.
+    The V0.4 fixture's forwards embed the -180 bps basis (A-1), so the strip
+    recovers it and the basis-aware gate is silent — a clean exit 0 with no
+    FX_PARITY_MISMATCH.
     """
     code = run_fx_diagnose(fx_diagnose_args)
     assert code == 0
